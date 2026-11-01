@@ -19,30 +19,40 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 private enum class Mode { UNDECIDED, SCRUB, MOVE, PAN, PINCH }
 
 private val Background = Color(0xFF1C1D21)
 private val TrackA = Color(0xFF24262B)
 private val TrackB = Color(0xFF282A30)
+private val VideoLane = Color(0xFF1F2430)
 private val RulerBg = Color(0xFF30333A)
+private val HeaderBg = Color(0xFF2A2C32)
 private val TextDim = Color(0xFFB8BCC6)
 private val PlayheadColor = Color(0xFFFF5A4E)
 private val SnapColor = Color(0xFFFFD54A)
+private val MuteOn = Color(0xFFE0B03A)
+private val VideoClipColor = Color(0xFF35507A)
 private val ClipColors = listOf(Color(0xFF2F7A5C), Color(0xFF3B5DA3), Color(0xFF7D4FA3), Color(0xFFA0683A))
 private val RulerSteps = doubleArrayOf(
     0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0,
@@ -52,36 +62,41 @@ private val RulerSteps = doubleArrayOf(
  * Gestures:
  *  - drag on the ruler (top strip): move the playhead
  *  - tap a clip: select it.  Tap empty space: deselect and move the playhead there
- *  - press and drag a clip: move it (left/right in time, up/down between tracks)
+ *  - press and drag a clip: move it (and anything linked to it) in time, or to another track of the same kind
  *  - drag empty space: scroll.  Pinch with two fingers: zoom
+ *  - tap an audio track's header (left edge): mute / unmute it
  */
 @Composable
 fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
     val textMeasurer = rememberTextMeasurer()
     val density = LocalDensity.current
     val rulerH = with(density) { 28.dp.toPx() }
-    val trackH = with(density) { 76.dp.toPx() }
+    val trackH = with(density) { 72.dp.toPx() }
+    val headerW = with(density) { 40.dp.toPx() }
     var scrollY by remember { mutableFloatStateOf(0f) }
 
-    fun frameAt(x: Float) = (vm.scrollFrames + x * vm.samplesPerPx).toLong().coerceAtLeast(0L)
-    fun xOf(f: Long) = ((f - vm.scrollFrames) / vm.samplesPerPx).toFloat()
-    fun trackAt(y: Float) = floor((y - rulerH + scrollY) / trackH).toInt()
+    fun frameAt(x: Float) = (vm.scrollFrames + (x - headerW) * vm.samplesPerPx).toLong().coerceAtLeast(0L)
+    fun xOf(f: Long) = headerW + ((f - vm.scrollFrames) / vm.samplesPerPx).toFloat()
+    fun laneAt(y: Float) = floor((y - rulerH + scrollY) / trackH).toInt()
     fun clipAt(p: Offset): Clip? {
-        if (p.y < rulerH) return null
-        val t = trackAt(p.y)
+        if (p.y < rulerH || p.x < headerW) return null
+        val lane = laneAt(p.y)
+        if (lane !in 0 until vm.laneCount) return null
+        val (video, track) = vm.laneKind(lane)
         val f = frameAt(p.x)
-        return vm.clips.lastOrNull { it.track == t && f >= it.start && f < it.end }
+        return vm.clips.lastOrNull { it.video == video && it.track == track && f >= it.start && f < it.end }
     }
 
     Canvas(
         modifier
             .clipToBounds()
-            .onSizeChanged { vm.viewWidthPx = it.width.toFloat() }
+            .onSizeChanged { vm.viewWidthPx = it.width - headerW }
             .pointerInput(Unit) {
                 val snapPx = 14.dp.toPx()
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val onRuler = down.position.y < rulerH
+                    val onHeader = !onRuler && down.position.x < headerW
                     val hit = clipAt(down.position)
                     var mode = if (onRuler) Mode.SCRUB else Mode.UNDECIDED
                     if (onRuler) vm.seek(frameAt(down.position.x))
@@ -97,7 +112,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                             if (pressed.size >= 2) {
                                 val zoom = event.calculateZoom()
                                 val centroid = event.calculateCentroid()
-                                if (zoom != 1f && centroid.isSpecified) vm.zoom(zoom, centroid.x)
+                                if (zoom != 1f && centroid.isSpecified) vm.zoom(zoom, centroid.x - headerW)
                                 vm.scrollByPx(event.calculatePan().x)
                             }
                             event.changes.forEach { it.consume() }
@@ -114,10 +129,10 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                                 if (hit != null) { mode = Mode.MOVE; vm.beginDrag(hit.id) } else mode = Mode.PAN
                             }
                             when (mode) {
-                                Mode.MOVE -> vm.dragTo(total.x, trackAt(ch.position.y), snapPx)
+                                Mode.MOVE -> vm.dragTo(total.x, laneAt(ch.position.y), snapPx)
                                 Mode.PAN -> {
                                     vm.scrollByPx(delta.x)
-                                    val maxY = (rulerH + vm.trackCount * trackH - size.height).coerceAtLeast(0f)
+                                    val maxY = (rulerH + vm.laneCount * trackH - size.height).coerceAtLeast(0f)
                                     scrollY = (scrollY - delta.y).coerceIn(0f, maxY)
                                 }
                                 else -> {}
@@ -127,9 +142,19 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     }
                     when (mode) {
                         Mode.MOVE -> vm.endDrag()
-                        Mode.UNDECIDED -> if (hit != null) vm.select(hit.id) else {
-                            vm.select(null)
-                            vm.seek(frameAt(down.position.x))
+                        Mode.UNDECIDED -> when {
+                            onHeader -> {
+                                val lane = laneAt(down.position.y)
+                                if (lane in 0 until vm.laneCount) {
+                                    val (video, track) = vm.laneKind(lane)
+                                    if (!video) vm.toggleMute(track)
+                                }
+                            }
+                            hit != null -> vm.select(hit.id)
+                            else -> {
+                                vm.select(null)
+                                vm.seek(frameAt(down.position.x))
+                            }
                         }
                         else -> {}
                     }
@@ -139,40 +164,51 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
         val w = size.width
         val h = size.height
         val spp = vm.samplesPerPx
+        val maxY = (rulerH + vm.laneCount * trackH - h).coerceAtLeast(0f)
+        if (scrollY > maxY) scrollY = maxY   // e.g. after undoing "add track"
         drawRect(Background)
 
-        // Tracks
-        for (t in 0 until vm.trackCount) {
-            val top = rulerH + t * trackH - scrollY
-            drawRect(if (t % 2 == 0) TrackA else TrackB, Offset(0f, top), Size(w, trackH))
+        // Lane backgrounds
+        for (lane in 0 until vm.laneCount) {
+            val top = rulerH + lane * trackH - scrollY
+            val video = vm.laneKind(lane).first
+            drawRect(if (video) VideoLane else if (lane % 2 == 0) TrackA else TrackB, Offset(0f, top), Size(w, trackH))
         }
 
         // Clips
         val preview = vm.dragPreview
-        val list = if (preview != null) vm.clips.filter { it.id != preview.id } + preview else vm.clips
+        val previewIds = preview?.map { it.id }?.toSet() ?: emptySet()
+        val list = if (preview != null) vm.clips.filter { it.id !in previewIds } + preview else vm.clips
+        val selected = vm.selectedIds
+        val waveColor = Color.White.copy(alpha = 0.7f)
         for (c in list) {
             val x0 = xOf(c.start)
             val x1 = xOf(c.end)
-            if (x1 < 0 || x0 > w) continue
-            val top = rulerH + c.track * trackH - scrollY + 4f
+            if (x1 < headerW || x0 > w) continue
+            val top = rulerH + vm.laneOf(c) * trackH - scrollY + 4f
             val ch = trackH - 8f
-            val base = ClipColors[c.track % ClipColors.size]
-            val isSelected = c.id == vm.selectedId
-            drawRoundRect(
-                base.copy(alpha = if (c === preview) 0.75f else 1f),
-                Offset(x0, top), Size(x1 - x0, ch), CornerRadius(10f),
-            )
-
-            // Waveform (shown with fades applied)
+            val muted = !c.video && c.track in vm.mutedTracks
+            val alpha = when {
+                c.id in previewIds -> 0.75f
+                muted -> 0.4f
+                else -> 1f
+            }
+            val base = if (c.video) VideoClipColor else ClipColors[c.track % ClipColors.size]
+            drawRoundRect(base.copy(alpha = alpha), Offset(x0, top), Size(x1 - x0, ch), CornerRadius(10f))
             val src = vm.sources[c.sourceId]
-            if (src != null) {
+
+            if (c.video) {
+                vm.thumbnails[c.sourceId]?.let { thumbs -> drawThumbnails(c, thumbs, x0, x1, top, ch, w, spp) }
+            } else if (src != null && src.peaks.isNotEmpty()) {
+                // Waveform (with fades applied), batched into one path per clip.
                 val mid = top + ch / 2
                 val half = ch / 2 - 6f
                 val step = 2
-                var x = max(x0, 0f).toInt()
+                val wave = Path()
+                var x = max(x0, headerW).toInt()
                 val xEnd = min(x1, w).toInt()
                 while (x < xEnd) {
-                    val rel = (vm.scrollFrames + x * spp).toLong() - c.start
+                    val rel = (vm.scrollFrames + (x - headerW) * spp).toLong() - c.start
                     if (rel in 0 until c.length) {
                         val s0 = c.sourceIn + rel
                         val p0 = (s0 / PEAK_BLOCK).toInt()
@@ -183,24 +219,23 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                             if (src.peaks[i] > peak) peak = src.peaks[i]
                             i++
                         }
-                        val amp = peak.coerceAtMost(1f) * c.gainAt(rel) * half
-                        drawLine(
-                            Color.White.copy(alpha = 0.7f),
-                            Offset(x.toFloat(), mid - amp), Offset(x.toFloat(), mid + amp), strokeWidth = 1.5f,
-                        )
+                        val amp = maxOf(peak.coerceAtMost(1f) * c.gainAt(rel) * half, 0.5f)
+                        wave.moveTo(x.toFloat(), mid - amp)
+                        wave.lineTo(x.toFloat(), mid + amp)
                     }
                     x += step
                 }
+                drawPath(wave, waveColor.copy(alpha = 0.7f * alpha), style = Stroke(width = 1.5f))
             }
 
             // Fade shapes
             if (c.fadeIn.frames > 0) drawFade(x0, xOf(c.start + c.fadeIn.frames), top, ch, true, c.fadeIn.curve)
             if (c.fadeOut.frames > 0) drawFade(xOf(c.end - c.fadeOut.frames), x1, top, ch, false, c.fadeOut.curve)
 
-            // Name
-            val textX = max(x0, 0f) + 8f
+            // Name (with a link mark for linked clips)
+            val textX = max(x0, headerW) + 8f
             val textW = x1 - textX - 6f
-            val name = src?.name ?: "missing"
+            val name = (if (c.linkId != null) "🔗 " else "") + (src?.name ?: "missing")
             if (textW > 24f) {
                 drawText(
                     textMeasurer, name, Offset(textX, top + 4f),
@@ -208,7 +243,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     overflow = TextOverflow.Ellipsis, maxLines = 1, size = Size(textW, ch / 2),
                 )
             }
-            if (isSelected) {
+            if (c.id in selected) {
                 drawRoundRect(
                     Color.White, Offset(x0, top), Size(x1 - x0, ch), CornerRadius(10f),
                     style = Stroke(width = 3.dp.toPx()),
@@ -216,19 +251,36 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
             }
         }
 
-        // Track labels
-        for (t in 0 until vm.trackCount) {
-            val top = rulerH + t * trackH - scrollY
-            drawText(
-                textMeasurer, "A${t + 1}", Offset(6f, top + trackH - 20.dp.toPx()),
-                TextStyle(color = TextDim, fontSize = 10.sp),
-            )
-        }
-
         // Snap guide
         vm.snapLine?.let {
             val x = xOf(it)
             drawLine(SnapColor, Offset(x, rulerH), Offset(x, h), strokeWidth = 2.dp.toPx())
+        }
+
+        // Track headers: V1, A1… and the mute button for audio tracks
+        drawRect(HeaderBg, Offset(0f, rulerH), Size(headerW, h - rulerH))
+        for (lane in 0 until vm.laneCount) {
+            val top = rulerH + lane * trackH - scrollY
+            val (video, track) = vm.laneKind(lane)
+            drawText(
+                textMeasurer, (if (video) "V" else "A") + (track + 1), Offset(8f, top + 8f),
+                TextStyle(color = TextDim, fontSize = 11.sp, fontWeight = FontWeight.Bold),
+            )
+            if (!video) {
+                val muted = track in vm.mutedTracks
+                val box = 22.dp.toPx()
+                val bx = (headerW - box) / 2
+                val by = top + trackH - box - 8.dp.toPx()
+                drawRoundRect(
+                    if (muted) MuteOn else TextDim.copy(alpha = 0.25f),
+                    Offset(bx, by), Size(box, box), CornerRadius(6f),
+                )
+                drawText(
+                    textMeasurer, "M", Offset(bx + box / 2 - 4.dp.toPx(), by + 3.dp.toPx()),
+                    TextStyle(color = if (muted) Color.Black else TextDim, fontSize = 11.sp, fontWeight = FontWeight.Bold),
+                )
+            }
+            drawLine(Background, Offset(0f, top + trackH), Offset(headerW, top + trackH), strokeWidth = 1f)
         }
 
         // Ruler
@@ -239,24 +291,59 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
         var i = 0L
         while (true) {
             val sec = (firstIndex + i) * stepSec
-            val x = ((sec * SAMPLE_RATE - vm.scrollFrames) / spp).toFloat()
+            val x = headerW + ((sec * SAMPLE_RATE - vm.scrollFrames) / spp).toFloat()
             if (x > w) break
-            drawLine(TextDim, Offset(x, rulerH * 0.55f), Offset(x, rulerH), strokeWidth = 1f)
-            drawText(textMeasurer, rulerLabel(sec, stepSec), Offset(x + 4f, 2f), TextStyle(color = TextDim, fontSize = 10.sp))
+            if (x >= headerW) {
+                drawLine(TextDim, Offset(x, rulerH * 0.55f), Offset(x, rulerH), strokeWidth = 1f)
+                drawText(textMeasurer, rulerLabel(sec, stepSec), Offset(x + 4f, 2f), TextStyle(color = TextDim, fontSize = 10.sp))
+            }
             i++
         }
 
         // Playhead
         val px = xOf(vm.playhead)
-        drawLine(PlayheadColor, Offset(px, 0f), Offset(px, h), strokeWidth = 2.dp.toPx())
-        val tri = Path().apply {
-            moveTo(px - 8.dp.toPx(), 0f); lineTo(px + 8.dp.toPx(), 0f); lineTo(px, 10.dp.toPx()); close()
+        if (px >= headerW) {
+            drawLine(PlayheadColor, Offset(px, 0f), Offset(px, h), strokeWidth = 2.dp.toPx())
+            val tri = Path().apply {
+                moveTo(px - 8.dp.toPx(), 0f); lineTo(px + 8.dp.toPx(), 0f); lineTo(px, 10.dp.toPx()); close()
+            }
+            drawPath(tri, PlayheadColor)
         }
-        drawPath(tri, PlayheadColor)
     }
 }
 
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawFade(
+/** Tiles the video's thumbnails along the clip, each showing the frame nearest its position. */
+private fun DrawScope.drawThumbnails(
+    c: Clip, thumbs: List<Thumb>, x0: Float, x1: Float, top: Float, ch: Float, w: Float, spp: Double,
+) {
+    if (thumbs.isEmpty()) return
+    val img0 = thumbs[0].image
+    val tileH = (ch - 18f).coerceAtLeast(8f)
+    val tileW = tileH * img0.width / img0.height.coerceAtLeast(1)
+    val tileTop = top + 16f
+    clipRect(max(x0, 0f), top, min(x1, w), top + ch) {
+        var x = x0
+        while (x < x1 && x < w) {
+            if (x + tileW >= 0) {
+                val frame = c.sourceIn + ((x + tileW / 2 - x0) * spp).toLong()
+                var lo = 0
+                var hi = thumbs.size - 1
+                while (lo < hi) {               // last thumb at or before this frame
+                    val mid = (lo + hi + 1) / 2
+                    if (thumbs[mid].frame <= frame) lo = mid else hi = mid - 1
+                }
+                drawImage(
+                    thumbs[lo].image,
+                    dstOffset = IntOffset(x.roundToInt(), tileTop.roundToInt()),
+                    dstSize = IntSize(tileW.roundToInt().coerceAtLeast(1), tileH.roundToInt()),
+                )
+            }
+            x += tileW
+        }
+    }
+}
+
+private fun DrawScope.drawFade(
     xs: Float, xe: Float, top: Float, ch: Float, isIn: Boolean, curve: FadeCurve,
 ) {
     val shade = Path()

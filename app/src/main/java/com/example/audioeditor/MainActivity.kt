@@ -28,8 +28,6 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         vm.stop() // pause playback when the app goes to the background
-        if (vm.clips.isNotEmpty()) {
-            vm.saveProject() // auto-save active project on pause
-        }
+        vm.autoSave() // keep unsaved work without overwriting other projects
     }
 }

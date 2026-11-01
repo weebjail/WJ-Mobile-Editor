@@ -16,6 +16,8 @@ data class SavedClip(
     val fadeInCurve: String,
     val fadeOutFrames: Long,
     val fadeOutCurve: String,
+    val video: Boolean = false,
+    val linkId: Long? = null,
 )
 
 data class SavedSource(
@@ -30,21 +32,34 @@ data class ProjectData(
     val playhead: Long,
     val sources: List<SavedSource>,
     val clips: List<SavedClip>,
+    val videoTrackCount: Int = 1,
+    val mutedTracks: Set<Int> = emptySet(),
 )
 
 object ProjectStore {
     private fun dir(context: Context): File = File(context.filesDir, "projects").apply { mkdirs() }
 
+    /** Makes a user-typed project name safe to use as a file name (no slashes, colons, etc.). */
+    fun safeName(name: String): String =
+        name.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_").trim().trim('.').take(80)
+            .takeUnless { s -> s.all { it == '_' || it == '.' || it.isWhitespace() } } ?: "Untitled"
+
+    private fun file(context: Context, name: String) = File(dir(context), "${safeName(name)}.json")
+
+    fun exists(context: Context, name: String): Boolean = file(context, name).exists()
+
     fun listProjects(context: Context): List<String> {
         val files = dir(context).listFiles() ?: return emptyList()
-        return files.filter { it.extension == "json" }.map { it.nameWithoutExtension }.sorted()
+        return files.filter { it.extension == "json" }.map { it.nameWithoutExtension }.sortedBy { it.lowercase() }
     }
 
     fun save(context: Context, data: ProjectData) {
-        val file = File(dir(context), "${data.name}.json")
         val json = JSONObject().apply {
+            put("version", 2)
             put("name", data.name)
             put("trackCount", data.trackCount)
+            put("videoTrackCount", data.videoTrackCount)
+            put("mutedTracks", JSONArray(data.mutedTracks.sorted()))
             put("playhead", data.playhead)
 
             val srcsArray = JSONArray()
@@ -70,20 +85,32 @@ object ProjectStore {
                     put("fadeInCurve", c.fadeInCurve)
                     put("fadeOutFrames", c.fadeOutFrames)
                     put("fadeOutCurve", c.fadeOutCurve)
+                    put("video", c.video)
+                    c.linkId?.let { put("linkId", it) }
                 })
             }
             put("clips", clipsArray)
         }
-        file.writeText(json.toString(2))
+        // Write to a temp file first so a crash mid-save can't destroy the previous version.
+        val target = file(context, data.name)
+        val tmp = File(target.path + ".tmp")
+        tmp.writeText(json.toString(2))
+        if (!tmp.renameTo(target)) {
+            target.delete()
+            if (!tmp.renameTo(target)) throw java.io.IOException("Couldn't save the project")
+        }
     }
 
     fun load(context: Context, projectName: String): ProjectData? {
-        val file = File(dir(context), "$projectName.json")
+        val file = file(context, projectName)
         if (!file.exists()) return null
         val json = JSONObject(file.readText())
         val name = json.optString("name", projectName)
-        val trackCount = json.optInt("trackCount", 2)
-        val playhead = json.optLong("playhead", 0L)
+        val trackCount = json.optInt("trackCount", 2).coerceIn(1, MAX_AUDIO_TRACKS)
+        val videoTrackCount = json.optInt("videoTrackCount", 1).coerceIn(1, MAX_VIDEO_TRACKS)
+        val playhead = json.optLong("playhead", 0L).coerceAtLeast(0L)
+        val muted = HashSet<Int>()
+        json.optJSONArray("mutedTracks")?.let { a -> for (i in 0 until a.length()) muted += a.getInt(i) }
 
         val sourcesList = mutableListOf<SavedSource>()
         val srcsArray = json.optJSONArray("sources") ?: JSONArray()
@@ -111,12 +138,14 @@ object ProjectStore {
                 fadeInCurve = o.optString("fadeInCurve", "LINEAR"),
                 fadeOutFrames = o.optLong("fadeOutFrames", 0L),
                 fadeOutCurve = o.optString("fadeOutCurve", "LINEAR"),
+                video = o.optBoolean("video", false),
+                linkId = if (o.has("linkId")) o.getLong("linkId") else null,
             )
         }
-        return ProjectData(name, trackCount, playhead, sourcesList, clipsList)
+        return ProjectData(name, trackCount, playhead, sourcesList, clipsList, videoTrackCount, muted)
     }
 
     fun delete(context: Context, projectName: String) {
-        File(dir(context), "$projectName.json").delete()
+        file(context, projectName).delete()
     }
 }

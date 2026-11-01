@@ -5,9 +5,12 @@ import kotlin.math.abs
 /**
  * Editing rules. Each function takes the current list of clips and returns a new list,
  * which keeps undo/redo simple (we just remember old lists).
- * Ripple edits only shift clips on the same track.
+ * Ripple edits only shift clips in the same lane (same kind and track number).
  */
 object TimelineOps {
+
+    /** Clips whose ends are this close are treated as touching when making a crossfade (~1 video frame). */
+    const val ADJACENT_TOLERANCE = SAMPLE_RATE / 25L
 
     /** Cut a clip in two at [at]. The left part keeps the fade-in, the right part keeps the fade-out. */
     fun split(clips: List<Clip>, target: Clip, at: Long, newId: () -> Long): List<Clip> {
@@ -26,7 +29,7 @@ object TimelineOps {
         return clips.flatMap { if (it.id == target.id) listOf(left, right) else listOf(it) }
     }
 
-    /** Remove everything from the clip's start up to [at], then pull the rest of the track left. */
+    /** Remove everything from the clip's start up to [at], then pull the rest of the lane left. */
     fun rippleTrimStart(clips: List<Clip>, target: Clip, at: Long): List<Clip> {
         val d = at - target.start
         if (d <= 0 || at >= target.end) return clips
@@ -34,20 +37,20 @@ object TimelineOps {
             when {
                 it.id == target.id ->
                     it.copy(sourceIn = it.sourceIn + d, length = it.length - d).withValidFades()
-                it.track == target.track && it.start >= target.end -> it.copy(start = it.start - d)
+                it.sameLane(target) && it.start > target.start -> it.copy(start = it.start - d)
                 else -> it
             }
         }
     }
 
-    /** Remove everything from [at] to the clip's end, then pull the rest of the track left. */
+    /** Remove everything from [at] to the clip's end, then pull the rest of the lane left. */
     fun rippleTrimEnd(clips: List<Clip>, target: Clip, at: Long): List<Clip> {
         val d = target.end - at
         if (d <= 0 || at <= target.start) return clips
         return clips.map {
             when {
                 it.id == target.id -> it.copy(length = at - it.start).withValidFades()
-                it.track == target.track && it.start >= target.end -> it.copy(start = it.start - d)
+                it.sameLane(target) && it.start > target.start -> it.copy(start = it.start - d)
                 else -> it
             }
         }
@@ -57,53 +60,96 @@ object TimelineOps {
 
     fun rippleDelete(clips: List<Clip>, target: Clip): List<Clip> =
         clips.filter { it.id != target.id }.map {
-            if (it.track == target.track && it.start >= target.end) it.copy(start = it.start - target.length) else it
+            if (it.sameLane(target) && it.start > target.start) it.copy(start = it.start - target.length) else it
         }
 
-    /** Applies a crossfade transition between two adjacent or overlapping clips on the same track. */
-    fun crossfade(clips: List<Clip>, target: Clip, durationFrames: Long = SAMPLE_RATE.toLong()): List<Clip> {
-        val sameTrack = clips.filter { it.track == target.track }.sortedBy { it.start }
-        val idx = sameTrack.indexOfFirst { it.id == target.id }
-        if (idx < 0) return clips
-        val prev = sameTrack.getOrNull(idx - 1)
-        val next = sameTrack.getOrNull(idx + 1)
-
-        val leftClip: Clip?
-        val rightClip: Clip?
-
-        if (prev != null && (abs(target.start - prev.end) < durationFrames * 2 || target.start < prev.end)) {
-            leftClip = prev
-            rightClip = target
-        } else if (next != null && (abs(next.start - target.end) < durationFrames * 2 || next.start < target.end)) {
-            leftClip = target
-            rightClip = next
-        } else {
-            val dur = minOf(durationFrames, target.length / 2).coerceAtLeast(1L)
-            return clips.map {
-                if (it.id == target.id) {
-                    it.copy(fadeIn = Fade(dur, target.fadeIn.curve), fadeOut = Fade(dur, target.fadeOut.curve)).withValidFades()
-                } else it
-            }
-        }
-
-        val dur = minOf(durationFrames, leftClip.length, rightClip.length).coerceAtLeast(1L)
-        return clips.map {
-            when (it.id) {
-                leftClip.id -> it.copy(fadeOut = Fade(dur, leftClip.fadeOut.curve)).withValidFades()
-                rightClip.id -> it.copy(fadeIn = Fade(dur, rightClip.fadeIn.curve)).withValidFades()
-                else -> it
-            }
-        }
+    sealed interface CrossfadeResult {
+        data class Done(val clips: List<Clip>) : CrossfadeResult
+        data object NoHandles : CrossfadeResult
     }
 
     /**
-     * Drop clip [m] onto the timeline in "overwrite" mode, like a pro editor:
-     * whatever it lands on is trimmed, split or removed.
+     * Crossfade like Resolve: at the edit point nearest [near], the outgoing clip is extended past the cut
+     * and the incoming clip starts before it, using the extra media beyond each edit ("handles"),
+     * so both play at once while one fades out and the other fades in. Clip timing (sync) is unchanged.
+     * The transition is centred on the cut; if one side lacks media the other side makes up the difference.
+     * With no neighbouring clip, the clip fades from/to silence at both ends instead.
+     */
+    fun crossfade(
+        clips: List<Clip>,
+        target: Clip,
+        near: Long,
+        duration: Long,
+        curve: FadeCurve,
+        sourceFrames: (Long) -> Long,
+    ): CrossfadeResult {
+        val lane = clips.filter { it.sameLane(target) && it.id != target.id }
+        val prev = lane.filter { it.start < target.start && it.end >= target.start - ADJACENT_TOLERANCE }
+            .maxByOrNull { it.end }
+        val next = lane.filter { it.start > target.start && it.start <= target.end + ADJACENT_TOLERANCE }
+            .minByOrNull { it.start }
+        val pair = when {
+            prev != null && next != null ->
+                if (abs(near - target.start) <= abs(near - target.end)) prev to target else target to next
+            prev != null -> prev to target
+            next != null -> target to next
+            else -> null
+        }
+        if (pair == null) {
+            val dur = minOf(duration, target.length / 2).coerceAtLeast(1L)
+            return CrossfadeResult.Done(clips.map {
+                if (it.id == target.id) it.copy(fadeIn = Fade(dur, curve), fadeOut = Fade(dur, curve)).withValidFades() else it
+            })
+        }
+        var (a, b) = pair
+
+        // If these clips already overlap (an existing crossfade), go back to a plain cut in the middle first.
+        if (b.start < a.end) {
+            val cut = (b.start + a.end) / 2
+            a = a.copy(length = cut - a.start)
+            b = b.copy(start = cut, sourceIn = b.sourceIn + (cut - b.start), length = b.end - cut)
+        }
+        val cut = b.start
+        val gap = cut - a.end                                         // 0 when touching
+        val handleA = sourceFrames(a.sourceId) - (a.sourceIn + a.length) - gap
+        val handleB = b.sourceIn
+        if (handleA < 0) return CrossfadeResult.NoHandles             // A can't even reach across the gap
+        val half = duration / 2
+        var after = minOf(half, handleA).coerceAtLeast(0L)            // how far A runs past the cut
+        var before = minOf(half, handleB).coerceAtLeast(0L)           // how early B starts before the cut
+        after = minOf(duration - before, handleA).coerceAtLeast(0L)
+        before = minOf(duration - after, handleB).coerceAtLeast(0L)
+        // Neither clip may be swallowed by the transition.
+        after = minOf(after, b.length / 2)
+        before = minOf(before, a.length / 2)
+        if (after + before <= 0) return CrossfadeResult.NoHandles
+
+        // A also covers any small gap before the cut; the blended region is [cut - before, cut + after].
+        val len = after + before
+        val newA = a.copy(length = cut + after - a.start, fadeOut = Fade(len, curve)).withValidFades()
+        val newB = b.copy(
+            start = cut - before,
+            sourceIn = b.sourceIn - before,
+            length = b.end - (cut - before),
+            fadeIn = Fade(len, curve),
+        ).withValidFades()
+        return CrossfadeResult.Done(clips.map {
+            when (it.id) {
+                newA.id -> newA
+                newB.id -> newB
+                else -> it
+            }
+        })
+    }
+
+    /**
+     * Drop clip [m] onto the timeline in "overwrite" mode, like Resolve:
+     * whatever it lands on in the same lane is trimmed, split or removed.
      */
     fun place(others: List<Clip>, m: Clip, newId: () -> Long): List<Clip> {
         val result = ArrayList<Clip>()
         for (o in others) {
-            if (o.track != m.track || o.end <= m.start || o.start >= m.end) {
+            if (!o.sameLane(m) || o.end <= m.start || o.start >= m.end) {
                 result += o; continue
             }
             val keepsHead = o.start < m.start
@@ -122,6 +168,10 @@ object TimelineOps {
         result += m
         return result
     }
+
+    /** True if [start, end) is free of clips in the given lane, ignoring clips in [ignore]. */
+    fun laneFree(clips: List<Clip>, video: Boolean, track: Int, start: Long, end: Long, ignore: Set<Long>): Boolean =
+        clips.none { it.video == video && it.track == track && it.id !in ignore && it.start < end && it.end > start }
 
     /**
      * If the dragged clip's start or end is within [threshold] of any edge, snap to it.

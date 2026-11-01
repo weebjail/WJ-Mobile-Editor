@@ -4,9 +4,12 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 
-/** Mixes all clips (with their fades) into stereo audio. Used for both playback and export. */
-class Mixer(private val sources: Map<Long, AudioSource>, clips: List<Clip>) {
-    private val sorted = clips.sortedBy { it.start }
+/**
+ * Mixes all audio clips (with their fades) into stereo audio. Used for playback, export and sync.
+ * Video clips are silent here; their sound comes from their linked audio clips. Muted tracks are skipped.
+ */
+class Mixer(private val sources: Map<Long, AudioSource>, clips: List<Clip>, mutedTracks: Set<Int> = emptySet()) {
+    private val sorted = clips.filter { !it.video && it.track !in mutedTracks }.sortedBy { it.start }
     val totalFrames: Long = clips.maxOfOrNull { it.end } ?: 0L
 
     /** Fills [out] with [frames] stereo frames starting at timeline position [start]. */
@@ -15,18 +18,19 @@ class Mixer(private val sources: Map<Long, AudioSource>, clips: List<Clip>) {
         val end = start + frames
         for (c in sorted) {
             if (c.end <= start || c.start >= end) continue
-            val src = sources[c.sourceId] ?: continue
-            var t = maxOf(start, c.start)
-            val stop = minOf(end, c.end)
+            val pcm = sources[c.sourceId]?.pcm ?: continue
+            val from = maxOf(start, c.start)
+            val stop = minOf(end, c.end, c.start - c.sourceIn + pcm.frames)
+            val fadeInEnd = c.start + c.fadeIn.frames
+            val fadeOutStart = c.end - c.fadeOut.frames
+            var t = from
             while (t < stop) {
                 val rel = t - c.start
                 val srcFrame = c.sourceIn + rel
-                if (srcFrame >= src.frames) break
-                val g = c.gainAt(rel)
+                val g = if (t < fadeInEnd || t >= fadeOutStart) c.gainAt(rel) else 1f
                 val o = ((t - start) * 2).toInt()
-                val si = (srcFrame * 2).toInt()
-                out[o] += src.pcm.get(si) * g
-                out[o + 1] += src.pcm.get(si + 1) * g
+                out[o] += pcm.left(srcFrame) * g
+                out[o + 1] += pcm.right(srcFrame) * g
                 t++
             }
         }
@@ -83,9 +87,8 @@ class Player {
                 var off = 0
                 while (off < buf.size && running) {
                     val w = t.write(buf, off, buf.size - off, AudioTrack.WRITE_BLOCKING)
-                    if (w < 0) running = false
-                    if (w <= 0) break
-                    off += w
+                    if (w < 0) { running = false; break }
+                    off += w   // a 0-byte write just retries, so no audio is skipped
                 }
                 pos += n
             }

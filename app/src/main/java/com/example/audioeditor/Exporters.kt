@@ -15,12 +15,20 @@ enum class FrameRate(val label: String, val timebase: Int, val ntsc: Boolean) {
     F24("24", 24, false),
     F25("25", 25, false),
     F29_97("29.97", 30, true),
-    F30("30", 30, false);
+    F30("30", 30, false),
+    F50("50", 50, false),
+    F59_94("59.94", 60, true),
+    F60("60", 60, false);
 
     val fps: Double get() = if (ntsc) timebase * 1000.0 / 1001.0 else timebase.toDouble()
 
     /** XML timelines count in video frames, so audio positions are rounded to the nearest frame. */
     fun toFrames(samples: Long): Long = Math.round(samples * fps / SAMPLE_RATE)
+
+    companion object {
+        /** The listed rate closest to a video file's own frame rate. */
+        fun closestTo(fps: Double): FrameRate = entries.minBy { kotlin.math.abs(it.fps - fps) }
+    }
 }
 
 object Exporters {
@@ -64,26 +72,26 @@ object Exporters {
         o.flush()
     }
 
+    class Timeline(
+        val name: String,
+        val clips: List<Clip>,
+        val sources: Map<Long, AudioSource>,
+        val audioTracks: Int,
+        val videoTracks: Int,
+        val mutedTracks: Set<Int>,
+    )
+
     /**
-     * Saves into the chosen folder: a copy of every audio file used, plus an FCP7-style XML timeline
+     * Saves into the chosen folder: a copy of every media file used, plus an FCP7-style XML timeline
      * that DaVinci Resolve can import (File > Import > Timeline).
      */
-    fun writeResolvePackage(
-        context: Context,
-        tree: Uri,
-        projectName: String,
-        clips: List<Clip>,
-        sources: Map<Long, AudioSource>,
-        trackCount: Int,
-        rate: FrameRate,
-        pathPrefix: String,
-    ) {
+    fun writeResolvePackage(context: Context, tree: Uri, t: Timeline, rate: FrameRate, pathPrefix: String) {
         val cr = context.contentResolver
         val dir = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
 
         val fileNames = HashMap<Long, String>()
-        for (id in clips.map { it.sourceId }.toSet()) {
-            val src = sources[id] ?: continue
+        for (id in t.clips.map { it.sourceId }.toSet()) {
+            val src = t.sources[id] ?: continue
             val mime = cr.getType(src.uri) ?: "application/octet-stream"
             val doc = DocumentsContract.createDocument(cr, dir, mime, src.name)
                 ?: throw IOException("Couldn't create ${src.name}")
@@ -96,8 +104,8 @@ object Exporters {
             fileNames[id] = AudioDecoder.displayName(context, doc)
         }
 
-        val xml = buildXml(projectName, clips, sources, fileNames, trackCount, rate, pathPrefix)
-        val xmlDoc = DocumentsContract.createDocument(cr, dir, "text/xml", "$projectName.xml")
+        val xml = buildXml(t, fileNames, rate, pathPrefix)
+        val xmlDoc = DocumentsContract.createDocument(cr, dir, "text/xml", "${ProjectStore.safeName(t.name)}.xml")
             ?: throw IOException("Couldn't create the XML file")
         val out = cr.openOutputStream(xmlDoc) ?: throw IOException("Couldn't write the XML file")
         out.use { it.write(xml.toByteArray(Charsets.UTF_8)) }
@@ -106,76 +114,120 @@ object Exporters {
     private fun esc(s: String) =
         s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
 
-    private fun buildXml(
-        name: String,
-        clips: List<Clip>,
-        sources: Map<Long, AudioSource>,
-        fileNames: Map<Long, String>,
-        trackCount: Int,
-        rate: FrameRate,
-        pathPrefix: String,
-    ): String {
+    /** Percent-encodes characters that would break a file:// URL. */
+    private fun urlPath(s: String): String = buildString {
+        for (ch in s) when {
+            ch.isLetterOrDigit() || ch in "/-_.~:()" -> append(ch)
+            else -> ch.toString().toByteArray(Charsets.UTF_8).forEach { append("%%%02X".format(it.toInt() and 0xFF)) }
+        }
+    }
+
+    /** One clip as it will be written: start/end may be moved to a crossfade's centre. */
+    private class Item(val clip: Clip, var start: Long, var end: Long, var fadeIn: Boolean, var fadeOut: Boolean)
+
+    /** A centred crossfade between two overlapping clips in the same lane. */
+    private class Xfade(val start: Long, val end: Long, val curve: FadeCurve)
+
+    private fun buildXml(t: Timeline, fileNames: Map<Long, String>, rate: FrameRate, pathPrefix: String): String {
         val rateXml = "<rate><timebase>${rate.timebase}</timebase><ntsc>${if (rate.ntsc) "TRUE" else "FALSE"}</ntsc></rate>"
-        val total = rate.toFrames(clips.maxOf { it.end })
+        val total = rate.toFrames(t.clips.maxOf { it.end })
         val prefix = pathPrefix.trim().replace('\\', '/').trimStart('/')
             .let { if (it.isEmpty() || it.endsWith("/")) it else "$it/" }
-
-        val sb = StringBuilder()
-        sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE xmeml>\n<xmeml version=\"5\">\n")
-        sb.append("<sequence id=\"sequence-1\">\n<name>${esc(name)}</name>\n<duration>$total</duration>\n$rateXml\n")
-        sb.append("<timecode>$rateXml<string>00:00:00:00</string><frame>0</frame><displayformat>NDF</displayformat></timecode>\n")
-        sb.append("<media>\n")
-        sb.append("<video><format><samplecharacteristics>$rateXml<width>1920</width><height>1080</height>")
-        sb.append("<pixelaspectratio>square</pixelaspectratio></samplecharacteristics></format></video>\n")
-        sb.append("<audio>\n<numOutputChannels>2</numOutputChannels>\n")
-        sb.append("<format><samplecharacteristics><depth>24</depth><samplerate>$SAMPLE_RATE</samplerate></samplecharacteristics></format>\n")
+        val firstVideo = t.clips.firstNotNullOfOrNull { c -> t.sources[c.sourceId]?.video?.takeIf { c.video } }
+        val width = firstVideo?.width ?: 1920
+        val height = firstVideo?.height ?: 1080
 
         val defined = HashSet<Long>()
         var clipNum = 1
-        for (t in 0 until trackCount) {
-            sb.append("<track>\n")
-            for (c in clips.filter { it.track == t }.sortedBy { it.start }) {
-                val src = sources[c.sourceId] ?: continue
-                val start = rate.toFrames(c.start)
-                val end = rate.toFrames(c.end)
-                val len = end - start
-                if (len <= 0) continue
-                val inF = rate.toFrames(c.sourceIn)
-                val outF = inF + len
-                val fileName = fileNames[c.sourceId] ?: src.name
-                val srcDuration = rate.toFrames(src.frames)
 
-                if (c.fadeIn.frames > 0) {
-                    val f = maxOf(1L, rate.toFrames(c.fadeIn.frames)).coerceAtMost(len)
-                    appendFade(sb, rateXml, start, start + f, "start-black", c.fadeIn.curve)
-                }
-                sb.append("<clipitem id=\"clipitem-${clipNum++}\">\n<name>${esc(fileName)}</name>\n<enabled>TRUE</enabled>\n")
-                sb.append("<duration>$srcDuration</duration>\n$rateXml\n")
-                sb.append("<start>$start</start><end>$end</end><in>$inF</in><out>$outF</out>\n")
-                if (defined.add(c.sourceId)) {
-                    val path = (prefix + fileName).replace(" ", "%20")
-                    sb.append("<file id=\"file-${c.sourceId}\">\n<name>${esc(fileName)}</name>\n")
-                    sb.append("<pathurl>${esc("file://localhost/$path")}</pathurl>\n$rateXml\n<duration>$srcDuration</duration>\n")
-                    sb.append("<media><audio><samplecharacteristics><depth>${src.originalBitDepth}</depth>")
-                    sb.append("<samplerate>${src.originalSampleRate}</samplerate></samplecharacteristics>")
-                    sb.append("<channelcount>${src.originalChannels}</channelcount></audio></media>\n</file>\n")
-                } else {
-                    sb.append("<file id=\"file-${c.sourceId}\"/>\n")
-                }
-                sb.append("<sourcetrack><mediatype>audio</mediatype><trackindex>1</trackindex></sourcetrack>\n</clipitem>\n")
-                if (c.fadeOut.frames > 0) {
-                    val f = maxOf(1L, rate.toFrames(c.fadeOut.frames)).coerceAtMost(len)
-                    appendFade(sb, rateXml, end - f, end, "end-black", c.fadeOut.curve)
+        fun fileXml(sb: StringBuilder, src: AudioSource, sourceId: Long) {
+            val fileName = fileNames[sourceId] ?: src.name
+            val srcDuration = rate.toFrames(src.frames)
+            if (!defined.add(sourceId)) {
+                sb.append("<file id=\"file-$sourceId\"/>\n")
+                return
+            }
+            sb.append("<file id=\"file-$sourceId\">\n<name>${esc(fileName)}</name>\n")
+            sb.append("<pathurl>${esc("file://localhost/" + urlPath(prefix + fileName))}</pathurl>\n$rateXml\n")
+            sb.append("<duration>$srcDuration</duration>\n<media>")
+            src.video?.let {
+                sb.append("<video><samplecharacteristics>$rateXml<width>${it.width}</width><height>${it.height}</height>")
+                sb.append("</samplecharacteristics></video>")
+            }
+            if (src.hasAudio) {
+                sb.append("<audio><samplecharacteristics><depth>${src.originalBitDepth}</depth>")
+                sb.append("<samplerate>${src.originalSampleRate}</samplerate></samplecharacteristics>")
+                sb.append("<channelcount>${src.originalChannels}</channelcount></audio>")
+            }
+            sb.append("</media>\n</file>\n")
+        }
+
+        fun lane(sb: StringBuilder, laneClips: List<Clip>, isVideo: Boolean, enabled: Boolean) {
+            sb.append("<track>\n")
+            val items = laneClips.sortedBy { it.start }.map { Item(it, it.start, it.end, it.fadeIn.frames > 0, it.fadeOut.frames > 0) }
+            val xfades = HashMap<Int, Xfade>()   // crossfade after item i
+            if (!isVideo) {
+                for (i in 0 until items.size - 1) {
+                    val a = items[i]; val b = items[i + 1]
+                    if (b.clip.start < a.clip.end) {
+                        val cut = (b.clip.start + a.clip.end) / 2
+                        a.end = cut; a.fadeOut = false
+                        b.start = cut; b.fadeIn = false
+                        xfades[i] = Xfade(b.clip.start, a.clip.end, a.clip.fadeOut.curve)
+                    }
                 }
             }
-            sb.append("<enabled>TRUE</enabled><locked>FALSE</locked>\n</track>\n")
+            for ((i, it) in items.withIndex()) {
+                val c = it.clip
+                val src = t.sources[c.sourceId] ?: continue
+                val start = rate.toFrames(it.start)
+                val end = rate.toFrames(it.end)
+                val len = end - start
+                if (len <= 0) continue
+                val inF = rate.toFrames(c.sourceIn + (it.start - c.start))
+                val fileName = fileNames[c.sourceId] ?: src.name
+
+                if (it.fadeIn) {
+                    val f = maxOf(1L, rate.toFrames(c.fadeIn.frames)).coerceAtMost(len)
+                    appendTransition(sb, rateXml, start, start + f, "start-black", c.fadeIn.curve)
+                }
+                sb.append("<clipitem id=\"clipitem-${clipNum++}\">\n<name>${esc(fileName)}</name>\n<enabled>TRUE</enabled>\n")
+                sb.append("<duration>${rate.toFrames(src.frames)}</duration>\n$rateXml\n")
+                sb.append("<start>$start</start><end>$end</end><in>$inF</in><out>${inF + len}</out>\n")
+                fileXml(sb, src, c.sourceId)
+                if (!isVideo) {
+                    sb.append("<sourcetrack><mediatype>audio</mediatype><trackindex>1</trackindex></sourcetrack>\n")
+                }
+                sb.append("</clipitem>\n")
+                if (it.fadeOut) {
+                    val f = maxOf(1L, rate.toFrames(c.fadeOut.frames)).coerceAtMost(len)
+                    appendTransition(sb, rateXml, end - f, end, "end-black", c.fadeOut.curve)
+                }
+                xfades[i]?.let { x ->
+                    appendTransition(sb, rateXml, rate.toFrames(x.start), rate.toFrames(x.end), "center", x.curve)
+                }
+            }
+            sb.append("<enabled>${if (enabled) "TRUE" else "FALSE"}</enabled><locked>FALSE</locked>\n</track>\n")
         }
+
+        val sb = StringBuilder()
+        sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE xmeml>\n<xmeml version=\"5\">\n")
+        sb.append("<sequence id=\"sequence-1\">\n<name>${esc(t.name)}</name>\n<duration>$total</duration>\n$rateXml\n")
+        sb.append("<timecode>$rateXml<string>00:00:00:00</string><frame>0</frame><displayformat>NDF</displayformat></timecode>\n")
+        sb.append("<media>\n")
+        sb.append("<video>\n<format><samplecharacteristics>$rateXml<width>$width</width><height>$height</height>")
+        sb.append("<pixelaspectratio>square</pixelaspectratio></samplecharacteristics></format>\n")
+        for (v in 0 until t.videoTracks) lane(sb, t.clips.filter { it.video && it.track == v }, true, true)
+        sb.append("</video>\n")
+        sb.append("<audio>\n<numOutputChannels>2</numOutputChannels>\n")
+        sb.append("<format><samplecharacteristics><depth>24</depth><samplerate>$SAMPLE_RATE</samplerate></samplecharacteristics></format>\n")
+        for (a in 0 until t.audioTracks) lane(sb, t.clips.filter { !it.video && it.track == a }, false, a !in t.mutedTracks)
         sb.append("</audio>\n</media>\n</sequence>\n</xmeml>\n")
         return sb.toString()
     }
 
-    /** Fades become audio transitions in Resolve. The curve shape is approximated (see NOTES.md). */
-    private fun appendFade(sb: StringBuilder, rateXml: String, start: Long, end: Long, alignment: String, curve: FadeCurve) {
+    /** Fades and crossfades become Resolve audio transitions with the matching curve. */
+    private fun appendTransition(sb: StringBuilder, rateXml: String, start: Long, end: Long, alignment: String, curve: FadeCurve) {
         val (name, id) = if (curve == FadeCurve.LINEAR) {
             "Cross Fade (0dB)" to "KGAudioTransCrossFade0dB"
         } else {

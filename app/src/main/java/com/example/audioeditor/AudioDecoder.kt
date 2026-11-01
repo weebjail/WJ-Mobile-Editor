@@ -6,7 +6,10 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -14,55 +17,213 @@ import java.io.InputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.nio.channels.FileChannel
+import java.security.MessageDigest
 import kotlin.math.abs
 
 private class NotHandledAsWav(msg: String) : IOException(msg)
 
 /**
- * Turns any supported audio file into 48 kHz stereo float PCM stored in a cache file.
+ * Decoded 48 kHz stereo audio, memory-mapped from the cache file.
+ * Mapped in 1 GB chunks because a single mapping can't exceed 2 GB (about 93 minutes of audio).
+ */
+class PcmData private constructor(private val chunks: Array<FloatBuffer>, val frames: Long) {
+    fun left(frame: Long): Float = at(frame * 2)
+    fun right(frame: Long): Float = at(frame * 2 + 1)
+
+    private fun at(i: Long): Float = chunks[(i ushr CHUNK_SHIFT).toInt()].get((i and CHUNK_MASK).toInt())
+
+    companion object {
+        private const val CHUNK_SHIFT = 28                 // 2^28 floats = 1 GB per chunk
+        private const val CHUNK_MASK = (1L shl CHUNK_SHIFT) - 1
+
+        fun map(file: File, frames: Long): PcmData = RandomAccessFile(file, "r").use { raf ->
+            val bytes = frames * 8
+            val chunkBytes = 4L shl CHUNK_SHIFT
+            val count = ((bytes + chunkBytes - 1) / chunkBytes).toInt()
+            val chunks = Array(count) { i ->
+                val offset = i * chunkBytes
+                raf.channel.map(FileChannel.MapMode.READ_ONLY, offset, minOf(chunkBytes, bytes - offset))
+                    .order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+            }
+            PcmData(chunks, frames)
+        }
+    }
+}
+
+/**
+ * Turns any supported audio or video file into 48 kHz stereo float PCM stored in a cache file.
  * WAV files are read by our own parser (8/16/24/32-bit integer and 32/64-bit float, incl. RF64
- * and WAVE_FORMAT_EXTENSIBLE). Everything else (MP3, AAC/M4A, FLAC, OGG, Opus, ...) goes through
- * Android's built-in decoders.
+ * and WAVE_FORMAT_EXTENSIBLE). Everything else (MP3, AAC/M4A, FLAC, OGG, Opus, and the audio of
+ * MP4/MOV video) goes through Android's built-in decoders.
+ *
+ * Results are cached by file identity (URI + size + modified time), so reopening a project
+ * doesn't decode everything again.
  */
 object AudioDecoder {
+
+    private const val META_VERSION = 2
+    private const val CACHE_LIMIT_BYTES = 4L shl 30   // 4 GB
 
     private class DecodeResult(
         val frames: Long, val sampleRate: Int, val channels: Int, val bitDepth: Int, val peaks: FloatArray,
     )
 
-    fun decode(context: Context, uri: Uri, id: Long, cacheDir: File): AudioSource {
-        val name = displayName(context, uri)
-        val outFile = File(cacheDir, "$id.f32")
-        val result = try {
-            context.contentResolver.openInputStream(uri)?.use { decodeWav(it, outFile) }
-                ?: throw IOException("Couldn't open $name")
-        } catch (e: NotHandledAsWav) {
-            decodeWithMediaCodec(context, uri, outFile)
-        }
-        if (result.frames <= 0) throw IOException("$name contains no audio")
-        val mapped = RandomAccessFile(outFile, "r").use { raf ->
-            raf.channel.map(FileChannel.MapMode.READ_ONLY, 0, raf.length())
-        }
-        val pcm = mapped.order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+    private class Meta(
+        val audioFrames: Long, val mediaFrames: Long,
+        val sampleRate: Int, val channels: Int, val bitDepth: Int,
+        val peaks: FloatArray, val video: VideoInfo?,
+    )
+
+    private class ProbedVideo(val info: VideoInfo, val frames: Long)
+
+    private class FileIdentity(val name: String, val size: Long, val modified: Long)
+
+    private fun cacheDir(context: Context) = File(context.cacheDir, "media").apply { mkdirs() }
+
+    fun decode(context: Context, uri: Uri, id: Long): AudioSource {
+        val ident = identify(context, uri)
+        val key = sha1("$uri|${ident.size}|${ident.modified}")
+        val dir = cacheDir(context)
+        val metaFile = File(dir, "$key.meta")
+        val pcmFile = File(dir, "$key.f32")
+
+        val meta = readMeta(metaFile)?.takeIf { it.audioFrames == 0L || pcmFile.length() == it.audioFrames * 8 }
+            ?: decodeToCache(context, uri, ident.name, dir, key, metaFile, pcmFile)
+        val now = System.currentTimeMillis()
+        metaFile.setLastModified(now)
+        pcmFile.setLastModified(now)
+
+        val pcm = if (meta.audioFrames > 0) PcmData.map(pcmFile, meta.audioFrames) else null
         return AudioSource(
-            id, uri, name, result.frames, result.sampleRate, result.channels,
-            result.bitDepth, pcm, result.peaks,
+            id, uri, ident.name, meta.mediaFrames, meta.sampleRate, meta.channels, meta.bitDepth,
+            pcm, meta.peaks, meta.video,
         )
     }
 
-    fun displayName(context: Context, uri: Uri): String {
+    /** Keeps the decode cache under its size limit, removing the least recently used files first. */
+    fun trimCache(context: Context) {
+        val files = cacheDir(context).listFiles() ?: return
+        files.filter { it.name.endsWith(".tmp") }.forEach { it.delete() }
+        val groups = files.filter { it.exists() }.groupBy { it.nameWithoutExtension }
+            .values.sortedByDescending { g -> g.maxOf { it.lastModified() } }
+        var total = 0L
+        for (g in groups) {
+            total += g.sumOf { it.length() }
+            if (total > CACHE_LIMIT_BYTES) g.forEach { it.delete() }
+        }
+    }
+
+    private fun decodeToCache(
+        context: Context, uri: Uri, name: String, dir: File, key: String, metaFile: File, pcmFile: File,
+    ): Meta {
+        val video = probeVideo(context, uri)
+        val tmp = File(dir, "$key.${System.nanoTime()}.tmp")
         try {
-            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-                ?.use { c ->
-                    if (c.moveToFirst()) {
-                        val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                        if (i >= 0) c.getString(i)?.let { return it }
-                    }
+            val audio = try {
+                context.contentResolver.openInputStream(uri)?.use { decodeWav(it, tmp) }
+                    ?: throw IOException("Couldn't open $name")
+            } catch (_: NotHandledAsWav) {
+                decodeWithMediaCodec(context, uri, tmp, allowNoAudio = video != null)
+            }
+            val audioFrames = audio?.frames ?: 0L
+            val mediaFrames = maxOf(audioFrames, video?.frames ?: 0L)
+            if (mediaFrames <= 0) throw IOException("$name contains no audio")
+            val meta = Meta(
+                audioFrames, mediaFrames,
+                audio?.sampleRate ?: 0, audio?.channels ?: 0, audio?.bitDepth ?: 0,
+                audio?.peaks ?: FloatArray(0), video?.info,
+            )
+            if (audioFrames > 0) {
+                pcmFile.delete()
+                if (!tmp.renameTo(pcmFile)) throw IOException("Couldn't write the audio cache")
+            }
+            writeMeta(metaFile, meta)
+            return meta
+        } finally {
+            tmp.delete()
+        }
+    }
+
+    private fun identify(context: Context, uri: Uri): FileIdentity {
+        var name: String? = null
+        var size = -1L
+        var modified = 0L
+        try {
+            context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    c.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let { name = c.getString(it) }
+                    c.getColumnIndex(OpenableColumns.SIZE).takeIf { it >= 0 && !c.isNull(it) }?.let { size = c.getLong(it) }
+                    c.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                        .takeIf { it >= 0 && !c.isNull(it) }?.let { modified = c.getLong(it) }
                 }
+            }
         } catch (_: Exception) {
         }
-        return uri.lastPathSegment ?: "audio"
+        return FileIdentity(name ?: uri.lastPathSegment ?: "media", size, modified)
+    }
+
+    fun displayName(context: Context, uri: Uri): String = identify(context, uri).name
+
+    private fun sha1(s: String): String =
+        MessageDigest.getInstance("SHA-1").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
+
+    private fun writeMeta(file: File, m: Meta) {
+        DataOutputStream(FileOutputStream(file).buffered()).use { o ->
+            o.writeInt(META_VERSION)
+            o.writeLong(m.audioFrames); o.writeLong(m.mediaFrames)
+            o.writeInt(m.sampleRate); o.writeInt(m.channels); o.writeInt(m.bitDepth)
+            o.writeBoolean(m.video != null)
+            m.video?.let { o.writeInt(it.width); o.writeInt(it.height); o.writeDouble(it.fps) }
+            o.writeInt(m.peaks.size)
+            for (p in m.peaks) o.writeFloat(p)
+        }
+    }
+
+    private fun readMeta(file: File): Meta? {
+        if (!file.exists()) return null
+        return try {
+            DataInputStream(file.inputStream().buffered()).use { i ->
+                if (i.readInt() != META_VERSION) return null
+                val audioFrames = i.readLong()
+                val mediaFrames = i.readLong()
+                val rate = i.readInt(); val ch = i.readInt(); val bits = i.readInt()
+                val video = if (i.readBoolean()) VideoInfo(i.readInt(), i.readInt(), i.readDouble()) else null
+                val peaks = FloatArray(i.readInt()) { i.readFloat() }
+                Meta(audioFrames, mediaFrames, rate, ch, bits, peaks, video)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // ---------------------------------------------------------------- Video metadata
+
+    private fun probeVideo(context: Context, uri: Uri): ProbedVideo? {
+        val ex = MediaExtractor()
+        try {
+            ex.setDataSource(context, uri, null)
+            for (i in 0 until ex.trackCount) {
+                val f = ex.getTrackFormat(i)
+                if (f.getString(MediaFormat.KEY_MIME)?.startsWith("video/") != true) continue
+                var w = f.getInteger(MediaFormat.KEY_WIDTH)
+                var h = f.getInteger(MediaFormat.KEY_HEIGHT)
+                val rotation = if (f.containsKey(MediaFormat.KEY_ROTATION)) f.getInteger(MediaFormat.KEY_ROTATION) else 0
+                if (rotation == 90 || rotation == 270) { val t = w; w = h; h = t }
+                val fps = if (f.containsKey(MediaFormat.KEY_FRAME_RATE)) {
+                    try { f.getInteger(MediaFormat.KEY_FRAME_RATE).toDouble() }
+                    catch (_: ClassCastException) { f.getFloat(MediaFormat.KEY_FRAME_RATE).toDouble() }
+                } else 30.0
+                val durUs = if (f.containsKey(MediaFormat.KEY_DURATION)) f.getLong(MediaFormat.KEY_DURATION) else 0L
+                return ProbedVideo(VideoInfo(w, h, fps), durUs * SAMPLE_RATE / 1_000_000)
+            }
+            return null
+        } catch (_: Exception) {
+            return null
+        } finally {
+            ex.release()
+        }
     }
 
     // ---------------------------------------------------------------- WAV
@@ -86,6 +247,7 @@ object AudioDecoder {
             val size = le32(chunkHeader, 4)
             when (chunkId) {
                 "fmt " -> {
+                    if (size < 16 || size > 4096) throw NotHandledAsWav("bad fmt chunk")
                     val fmt = ByteArray(size.toInt())
                     if (readFully(ins, fmt, fmt.size) < fmt.size) throw NotHandledAsWav("bad fmt chunk")
                     format = le16(fmt, 0)
@@ -114,24 +276,29 @@ object AudioDecoder {
         val frameBytes = bytesPerSample * channels
         var remaining = if (size == 0xFFFFFFFFL || size == 0L) Long.MAX_VALUE else size
         val sink = StereoSink(sampleRate, outFile)
-        val buf = ByteArray(frameBytes * 16384)
-        while (remaining > 0) {
-            var want = minOf(buf.size.toLong(), remaining).toInt()
-            want -= want % frameBytes
-            if (want == 0) break
-            val n = readFully(ins, buf, want)
-            val framesRead = n / frameBytes
-            for (f in 0 until framesRead) {
-                val base = f * frameBytes
-                val l = sampleAt(buf, base, format, bits)
-                val r = if (channels > 1) sampleAt(buf, base + bytesPerSample, format, bits) else l
-                sink.push(l, r)
+        try {
+            val buf = ByteArray(frameBytes * 16384)
+            while (remaining > 0) {
+                var want = minOf(buf.size.toLong(), remaining).toInt()
+                want -= want % frameBytes
+                if (want == 0) break
+                val n = readFully(ins, buf, want)
+                val framesRead = n / frameBytes
+                for (f in 0 until framesRead) {
+                    val base = f * frameBytes
+                    val l = sampleAt(buf, base, format, bits)
+                    val r = if (channels > 1) sampleAt(buf, base + bytesPerSample, format, bits) else l
+                    sink.push(l, r)
+                }
+                remaining -= n
+                if (n < want) break
             }
-            remaining -= n
-            if (n < want) break
+            val frames = sink.finish()
+            return DecodeResult(frames, sampleRate, channels, bits, sink.peaks())
+        } catch (e: Exception) {
+            sink.abort()
+            throw e
         }
-        val frames = sink.finish()
-        return DecodeResult(frames, sampleRate, channels, bits, sink.peaks())
     }
 
     private fun sampleAt(b: ByteArray, o: Int, format: Int, bits: Int): Float = when {
@@ -146,7 +313,8 @@ object AudioDecoder {
 
     // ---------------------------------------------------------------- Other formats
 
-    private fun decodeWithMediaCodec(context: Context, uri: Uri, outFile: File): DecodeResult {
+    /** Returns null when the file has no audio track and [allowNoAudio] is set (a silent video). */
+    private fun decodeWithMediaCodec(context: Context, uri: Uri, outFile: File, allowNoAudio: Boolean): DecodeResult? {
         val ex = MediaExtractor()
         try {
             ex.setDataSource(context, uri, null)
@@ -156,7 +324,10 @@ object AudioDecoder {
                     trackIndex = i; break
                 }
             }
-            if (trackIndex < 0) throw IOException("This file has no audio the phone can read")
+            if (trackIndex < 0) {
+                if (allowNoAudio) return null
+                throw IOException("This file has no audio the phone can read")
+            }
             ex.selectTrack(trackIndex)
             val inFormat = ex.getTrackFormat(trackIndex)
             val mime = inFormat.getString(MediaFormat.KEY_MIME)!!
@@ -167,10 +338,10 @@ object AudioDecoder {
             var encoding = AudioFormat.ENCODING_PCM_16BIT
 
             val codec = MediaCodec.createDecoderByType(mime)
+            var sink: StereoSink? = null
             try {
                 codec.configure(inFormat, null, null, 0)
                 codec.start()
-                var sink: StereoSink? = null
                 val info = MediaCodec.BufferInfo()
                 var inputDone = false
                 var outputDone = false
@@ -227,6 +398,9 @@ object AudioDecoder {
                 val s = sink ?: throw IOException("The decoder produced no audio")
                 val frames = s.finish()
                 return DecodeResult(frames, origRate, origChannels, 16, s.peaks())
+            } catch (e: Exception) {
+                sink?.abort()
+                throw e
             } finally {
                 try { codec.stop() } catch (_: Exception) {}
                 codec.release()
@@ -288,7 +462,8 @@ private class StereoSink(srcRate: Int, file: File) {
 
     fun push(l: Float, r: Float) {
         if (!resample) { emit(l, r); return }
-        // Simple linear-interpolation resampler (see NOTES.md: worth upgrading later).
+        // Linear-interpolation resampler. Fine for 44.1 kHz material; a windowed-sinc filter would
+        // be cleaner when downsampling 88.2/96 kHz recordings.
         if (k == 0L) { prevL = l; prevR = r; k = 1; return }
         while (pos < k) {
             val f = (pos - (k - 1)).toFloat()
@@ -326,6 +501,10 @@ private class StereoSink(srcRate: Int, file: File) {
         flush()
         out.close()
         return frames
+    }
+
+    fun abort() {
+        try { out.close() } catch (_: IOException) {}
     }
 
     fun peaks(): FloatArray = peaks.copyOf(peakCount)
