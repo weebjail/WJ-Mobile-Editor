@@ -14,7 +14,7 @@ const val MAX_AUDIO_TRACKS = 8
 const val MAX_VIDEO_TRACKS = 4
 
 /** Timeline format for new projects (and older projects saved before it was stored). */
-val DEFAULT_FRAME_RATE = FrameRate.F30
+val DEFAULT_FRAME_RATE = FrameRate.F29_97
 const val DEFAULT_WIDTH = 1920
 const val DEFAULT_HEIGHT = 1080
 
