@@ -34,6 +34,9 @@ data class ProjectData(
     val clips: List<SavedClip>,
     val videoTrackCount: Int = 1,
     val mutedTracks: Set<Int> = emptySet(),
+    val frameRate: String = FrameRate.F24.name,
+    val width: Int = 1920,
+    val height: Int = 1080,
 )
 
 object ProjectStore {
@@ -61,6 +64,9 @@ object ProjectStore {
             put("videoTrackCount", data.videoTrackCount)
             put("mutedTracks", JSONArray(data.mutedTracks.sorted()))
             put("playhead", data.playhead)
+            put("frameRate", data.frameRate)
+            put("width", data.width)
+            put("height", data.height)
 
             val srcsArray = JSONArray()
             for (s in data.sources) {
@@ -142,7 +148,12 @@ object ProjectStore {
                 linkId = if (o.has("linkId")) o.getLong("linkId") else null,
             )
         }
-        return ProjectData(name, trackCount, playhead, sourcesList, clipsList, videoTrackCount, muted)
+        return ProjectData(
+            name, trackCount, playhead, sourcesList, clipsList, videoTrackCount, muted,
+            frameRate = json.optString("frameRate", FrameRate.F24.name),
+            width = json.optInt("width", 1920).coerceIn(MIN_RESOLUTION, MAX_RESOLUTION),
+            height = json.optInt("height", 1080).coerceIn(MIN_RESOLUTION, MAX_RESOLUTION),
+        )
     }
 
     fun delete(context: Context, projectName: String) {

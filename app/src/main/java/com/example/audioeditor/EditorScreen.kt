@@ -17,8 +17,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
@@ -76,13 +76,24 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 
-private enum class Dialog { NONE, SAVE, LOAD, RESOLVE, SETTINGS, CONFIRM_NEW }
+private enum class Dialog { NONE, SAVE, LOAD, RESOLVE, SETTINGS, CONFIRM_NEW, NEW_PROJECT }
+
+/** Common timeline resolutions offered as one-tap choices. */
+private val ResolutionPresets = listOf(
+    "720p HD" to (1280 to 720),
+    "1080p HD" to (1920 to 1080),
+    "1440p" to (2560 to 1440),
+    "UHD 4K" to (3840 to 2160),
+    "DCI 4K" to (4096 to 2160),
+    "Vertical 1080" to (1080 to 1920),
+)
 
 @Composable
 fun EditorScreen(vm: EditorViewModel) {
@@ -90,7 +101,6 @@ fun EditorScreen(vm: EditorViewModel) {
     var dialog by remember { mutableStateOf(Dialog.NONE) }
 
     var exportName by remember { mutableStateOf("") }
-    var exportRate by remember { mutableStateOf(FrameRate.F24) }
     var exportPath by remember { mutableStateOf("") }
 
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
@@ -100,7 +110,7 @@ fun EditorScreen(vm: EditorViewModel) {
         it?.let(vm::exportWav)
     }
     val folderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let { vm.exportResolveXml(it, exportName.ifBlank { vm.projectName }, exportRate, exportPath) }
+        uri?.let { vm.exportResolveXml(it, exportName.ifBlank { vm.projectName }, exportPath) }
     }
 
     LaunchedEffect(vm.isPlaying) {
@@ -128,7 +138,7 @@ fun EditorScreen(vm: EditorViewModel) {
                 }
                 MenuBtn(Icons.Default.Folder, "Project") { close ->
                     DropdownMenuItem(text = { Text("New project") }, onClick = {
-                        close(); if (vm.dirty) dialog = Dialog.CONFIRM_NEW else vm.newProject()
+                        close(); dialog = if (vm.dirty) Dialog.CONFIRM_NEW else Dialog.NEW_PROJECT
                     })
                     DropdownMenuItem(text = { Text("Save project…") }, onClick = { close(); dialog = Dialog.SAVE })
                     DropdownMenuItem(text = { Text("Open project…") }, onClick = { close(); dialog = Dialog.LOAD })
@@ -149,7 +159,6 @@ fun EditorScreen(vm: EditorViewModel) {
                     DropdownMenuItem(text = { Text("Export DaVinci Resolve timeline (XML)") }, onClick = {
                         close()
                         exportName = vm.projectName
-                        exportRate = vm.suggestedFrameRate()
                         dialog = Dialog.RESOLVE
                     })
                 }
@@ -183,12 +192,12 @@ fun EditorScreen(vm: EditorViewModel) {
             }
             // BOTTOM ROW 2: editing
             ToolRow {
-                IconBtn(Icons.Default.ContentCut, "Cut at playhead", onClick = vm::cut)
+                IconBtn(Icons.Default.DeleteSweep, "Ripple delete clip") { vm.deleteSelected(true) }
+                IconBtn(Icons.Default.Delete, "Delete clip") { vm.deleteSelected(false) }
                 IconBtn(Icons.Default.FirstPage, "Ripple trim start to playhead", onClick = vm::rippleTrimStart)
                 IconBtn(Icons.Default.LastPage, "Ripple trim end to playhead", onClick = vm::rippleTrimEnd)
+                IconBtn(Icons.Default.ContentCut, "Cut at playhead", onClick = vm::cut)
                 IconBtn(Icons.Default.JoinFull, "Crossfade", onClick = vm::crossfade)
-                IconBtn(Icons.Default.Delete, "Delete clip") { vm.deleteSelected(false) }
-                IconBtn(Icons.Default.DeleteSweep, "Ripple delete clip") { vm.deleteSelected(true) }
             }
         }
 
@@ -200,11 +209,12 @@ fun EditorScreen(vm: EditorViewModel) {
         Dialog.SAVE -> SaveDialog(vm) { dialog = Dialog.NONE }
         Dialog.LOAD -> LoadDialog(vm) { dialog = Dialog.NONE }
         Dialog.SETTINGS -> SettingsDialog(vm) { dialog = Dialog.NONE }
+        Dialog.NEW_PROJECT -> NewProjectDialog(vm) { dialog = Dialog.NONE }
         Dialog.CONFIRM_NEW -> AlertDialog(
             onDismissRequest = { dialog = Dialog.NONE },
             title = { Text("Start a new project?") },
             text = { Text("“${vm.projectName}” has unsaved changes. They will be lost.") },
-            confirmButton = { TextButton(onClick = { dialog = Dialog.NONE; vm.newProject() }) { Text("Discard changes") } },
+            confirmButton = { TextButton(onClick = { dialog = Dialog.NEW_PROJECT }) { Text("Discard changes") } },
             dismissButton = { TextButton(onClick = { dialog = Dialog.NONE }) { Text("Cancel") } },
         )
         Dialog.RESOLVE -> AlertDialog(
@@ -217,12 +227,11 @@ fun EditorScreen(vm: EditorViewModel) {
                             "Copy the whole folder to your computer, then in Resolve use File > Import > Timeline."
                     )
                     OutlinedTextField(exportName, { exportName = it }, label = { Text("Timeline name") }, singleLine = true)
-                    Text("Resolve timeline frame rate")
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FrameRate.entries.forEach { r ->
-                            FilterChip(selected = exportRate == r, onClick = { exportRate = r }, label = { Text(r.label) })
-                        }
-                    }
+                    Text(
+                        "Timeline: ${vm.frameRate.label} fps, ${vm.timelineWidth}×${vm.timelineHeight}. " +
+                            "You can change these in Settings.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     OutlinedTextField(
                         exportPath, { exportPath = it },
                         label = { Text("Where the folder will be on your computer (optional)") },
@@ -347,13 +356,97 @@ private fun LoadDialog(vm: EditorViewModel, close: () -> Unit) {
     )
 }
 
+/** Editable timeline format, kept as text while typing. Valid only when both sides are in range. */
+private class FormatState(rate: FrameRate, width: Int, height: Int) {
+    var rate by mutableStateOf(rate)
+    var width by mutableStateOf(width.toString())
+    var height by mutableStateOf(height.toString())
+    val w: Int? get() = width.toIntOrNull()?.takeIf { it in MIN_RESOLUTION..MAX_RESOLUTION }
+    val h: Int? get() = height.toIntOrNull()?.takeIf { it in MIN_RESOLUTION..MAX_RESOLUTION }
+    val valid: Boolean get() = w != null && h != null
+}
+
 @Composable
-private fun SettingsDialog(vm: EditorViewModel, close: () -> Unit) {
+private fun TimelineFormatFields(s: FormatState) {
+    Text("Timeline frame rate", style = MaterialTheme.typography.titleSmall)
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FrameRate.entries.forEach { r ->
+            FilterChip(selected = s.rate == r, onClick = { s.rate = r }, label = { Text(r.label) })
+        }
+    }
+    Text("Timeline resolution", style = MaterialTheme.typography.titleSmall)
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        ResolutionPresets.forEach { (label, size) ->
+            FilterChip(
+                selected = s.w == size.first && s.h == size.second,
+                onClick = { s.width = size.first.toString(); s.height = size.second.toString() },
+                label = { Text(label) },
+            )
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        val numbers = KeyboardOptions(keyboardType = KeyboardType.Number)
+        OutlinedTextField(
+            s.width, { s.width = it.filter(Char::isDigit).take(4) }, label = { Text("Width") },
+            singleLine = true, keyboardOptions = numbers, isError = s.w == null, modifier = Modifier.weight(1f),
+        )
+        Text("×")
+        OutlinedTextField(
+            s.height, { s.height = it.filter(Char::isDigit).take(4) }, label = { Text("Height") },
+            singleLine = true, keyboardOptions = numbers, isError = s.h == null, modifier = Modifier.weight(1f),
+        )
+    }
+    if (!s.valid) {
+        Text(
+            "Width and height must be between $MIN_RESOLUTION and $MAX_RESOLUTION.",
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+@Composable
+private fun NewProjectDialog(vm: EditorViewModel, close: () -> Unit) {
+    var name by remember { mutableStateOf("Untitled") }
+    val format = remember { FormatState(vm.frameRate, vm.timelineWidth, vm.timelineHeight) }
     AlertDialog(
         onDismissRequest = close,
+        title = { Text("New project") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(name, { name = it }, label = { Text("Project name") }, singleLine = true)
+                TimelineFormatFields(format)
+                Text(
+                    "Match your camera's frame rate. Both can be changed later in Settings.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = format.valid,
+                onClick = { close(); vm.newProject(name, format.rate, format.w!!, format.h!!) },
+            ) { Text("Create") }
+        },
+        dismissButton = { TextButton(onClick = close) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun SettingsDialog(vm: EditorViewModel, close: () -> Unit) {
+    val format = remember { FormatState(vm.frameRate, vm.timelineWidth, vm.timelineHeight) }
+    val done = {
+        if (format.valid) vm.setTimelineFormat(format.rate, format.w!!, format.h!!)
+        close()
+    }
+    AlertDialog(
+        onDismissRequest = done,
         title = { Text("Settings") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("This project", style = MaterialTheme.typography.titleMedium)
+                TimelineFormatFields(format)
+                Text("Editing", style = MaterialTheme.typography.titleMedium)
                 Text("Default fade curve", style = MaterialTheme.typography.titleSmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
@@ -368,7 +461,7 @@ private fun SettingsDialog(vm: EditorViewModel, close: () -> Unit) {
                     )
                 }
                 Text(
-                    "Used for new clips and crossfades. Exponential matches Resolve's default “Cross Fade +3 dB”, " +
+                    "Applies to all fades and crossfades in the project. Exponential matches Resolve's default “Cross Fade +3 dB”, " +
                         "which keeps the volume steady through a crossfade.",
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -384,7 +477,7 @@ private fun SettingsDialog(vm: EditorViewModel, close: () -> Unit) {
                 )
             }
         },
-        confirmButton = { TextButton(onClick = close) { Text("Done") } },
+        confirmButton = { TextButton(onClick = done) { Text("Done") } },
     )
 }
 
@@ -416,20 +509,10 @@ private fun FadeControl(
     var editing by remember { mutableStateOf(false) }
     val maxFrames = minOf(available, 10L * SAMPLE_RATE).coerceAtLeast(1L).toFloat()
     Column(modifier) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(
-                "$label ${"%.2f".format(fade.frames / SAMPLE_RATE.toFloat())}s",
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.width(64.dp),
-            )
-            FadeCurve.entries.forEach { curve ->
-                FilterChip(
-                    selected = fade.curve == curve,
-                    onClick = { if (fade.curve != curve) { onStart(); onChange(fade.copy(curve = curve)) } },
-                    label = { Text(curve.label) },
-                )
-            }
-        }
+        Text(
+            "Fade $label ${"%.2f".format(fade.frames / SAMPLE_RATE.toFloat())}s",
+            style = MaterialTheme.typography.bodySmall,
+        )
         Slider(
             value = fade.frames.toFloat().coerceAtMost(maxFrames),
             onValueChange = {

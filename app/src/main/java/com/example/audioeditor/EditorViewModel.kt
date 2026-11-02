@@ -45,9 +45,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Length of crossfades made with the crossfade button (Resolve's default is 1 second). */
     var crossfadeSeconds by mutableFloatStateOf(prefs.getFloat(KEY_XFADE, 1f)); private set
 
+    /** Sets the fade curve for new fades, and switches every fade and crossfade in the project to it (undoable). */
     fun updateDefaultCurve(c: FadeCurve) {
         defaultCurve = c
         prefs.edit().putString(KEY_CURVE, c.name).apply()
+        val new = clips.map { it.copy(fadeIn = it.fadeIn.copy(curve = c), fadeOut = it.fadeOut.copy(curve = c)) }
+        if (new != clips) commit(new)
     }
 
     fun updateCrossfadeSeconds(s: Float) {
@@ -77,6 +80,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     var canUndo by mutableStateOf(false); private set
     var canRedo by mutableStateOf(false); private set
     var projectName by mutableStateOf("Untitled"); private set
+
+    /** Timeline frame rate and resolution, chosen when the project is created (editable in Settings). */
+    var frameRate by mutableStateOf(FrameRate.F24); private set
+    var timelineWidth by mutableIntStateOf(1920); private set
+    var timelineHeight by mutableIntStateOf(1080); private set
+
+    fun setTimelineFormat(rate: FrameRate, width: Int, height: Int) {
+        if (rate == frameRate && width == timelineWidth && height == timelineHeight) return
+        frameRate = rate
+        timelineWidth = width
+        timelineHeight = height
+        dirty = true
+    }
 
     /** Name of the project file this timeline was last saved to or loaded from (null = never saved). */
     private var savedName: String? = null
@@ -300,6 +316,29 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (isPlaying) { player.stop(); isPlaying = false }
         playhead = frame.coerceAtLeast(0L)
     }
+
+    /**
+     * Moves the playhead by hand. With snapping on, it locks onto the nearest clip edge or cut
+     * (or the start of the timeline) within [snapThresholdPx], and the snap guide shows it.
+     */
+    fun scrubTo(frame: Long, snapThresholdPx: Float) {
+        var f = frame.coerceAtLeast(0L)
+        var line: Long? = null
+        if (snapEnabled) {
+            val threshold = (snapThresholdPx * samplesPerPx).toLong()
+            var best = threshold + 1
+            for (e in sequenceOf(0L) + clips.asSequence().flatMap { sequenceOf(it.start, it.end) }) {
+                val d = kotlin.math.abs(e - f)
+                if (d < best) { best = d; line = e }
+            }
+            line?.let { f = it }
+        }
+        seek(f)
+        snapLine = line
+    }
+
+    /** Call when the finger lifts after [scrubTo]. */
+    fun endScrub() { snapLine = null }
 
     // ------------------------------------------------------------ Editing
 
@@ -543,6 +582,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             )
         },
         videoTrackCount, mutedTracks,
+        frameRate.name, timelineWidth, timelineHeight,
     )
 
     /** True if saving under [name] would replace a different, existing project. */
@@ -608,6 +648,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 trackCount = data.trackCount
                 videoTrackCount = data.videoTrackCount
                 mutedTracks = data.mutedTracks
+                frameRate = FrameRate.entries.find { it.name == data.frameRate } ?: FrameRate.F24
+                timelineWidth = data.width
+                timelineHeight = data.height
                 playhead = data.playhead
                 scrollFrames = 0.0
                 overrideSelectedId = null
@@ -634,8 +677,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun newProject() {
+    fun newProject(name: String, rate: FrameRate, width: Int, height: Int) {
         stop()
+        frameRate = rate
+        timelineWidth = width
+        timelineHeight = height
         clearHistory()
         sources = emptyMap()
         thumbnails = emptyMap()
@@ -646,10 +692,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         overrideSelectedId = null
         playhead = 0L
         scrollFrames = 0.0
-        projectName = "Untitled"
+        projectName = ProjectStore.safeName(name)
         savedName = null
         dirty = false
-        message = "New project started"
+        message = "New project started (${rate.label} fps, ${width}×$height)"
     }
 
     fun listProjects(): List<String> = ProjectStore.listProjects(ctx)
@@ -660,11 +706,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ------------------------------------------------------------ Export
-
-    /** The Resolve frame rate closest to the first video clip's own rate (24 if there's no video). */
-    fun suggestedFrameRate(): FrameRate =
-        clips.firstNotNullOfOrNull { c -> sources[c.sourceId]?.video?.takeIf { c.video } }
-            ?.let { FrameRate.closestTo(it.fps) } ?: FrameRate.F24
 
     fun exportWav(uri: Uri) {
         if (clips.isEmpty()) { message = "Nothing to export yet"; return }
@@ -686,10 +727,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun exportResolveXml(tree: Uri, name: String, rate: FrameRate, pathPrefix: String) {
+    fun exportResolveXml(tree: Uri, name: String, pathPrefix: String) {
         if (clips.isEmpty()) { message = "Nothing to export yet"; return }
         stop()
-        val timeline = Exporters.Timeline(name, clips, sources, trackCount, videoTrackCount, mutedTracks)
+        val rate = frameRate
+        val timeline = Exporters.Timeline(
+            name, clips, sources, trackCount, videoTrackCount, mutedTracks, timelineWidth, timelineHeight,
+        )
         viewModelScope.launch {
             busy = "Saving Resolve timeline…"
             try {

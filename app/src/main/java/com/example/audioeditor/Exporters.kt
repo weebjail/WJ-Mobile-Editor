@@ -79,6 +79,8 @@ object Exporters {
         val audioTracks: Int,
         val videoTracks: Int,
         val mutedTracks: Set<Int>,
+        val width: Int,
+        val height: Int,
     )
 
     /**
@@ -133,9 +135,8 @@ object Exporters {
         val total = rate.toFrames(t.clips.maxOf { it.end })
         val prefix = pathPrefix.trim().replace('\\', '/').trimStart('/')
             .let { if (it.isEmpty() || it.endsWith("/")) it else "$it/" }
-        val firstVideo = t.clips.firstNotNullOfOrNull { c -> t.sources[c.sourceId]?.video?.takeIf { c.video } }
-        val width = firstVideo?.width ?: 1920
-        val height = firstVideo?.height ?: 1080
+        val width = t.width
+        val height = t.height
 
         val defined = HashSet<Long>()
         var clipNum = 1

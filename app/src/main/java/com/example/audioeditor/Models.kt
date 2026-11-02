@@ -13,6 +13,10 @@ const val PEAK_BLOCK = 256
 const val MAX_AUDIO_TRACKS = 8
 const val MAX_VIDEO_TRACKS = 4
 
+/** Allowed timeline resolution (each side, in pixels). */
+const val MIN_RESOLUTION = 16
+const val MAX_RESOLUTION = 8192
+
 /**
  * Fade shapes, matching DaVinci Resolve's audio transitions:
  * LINEAR = "Cross Fade (0 dB)", CURVED = "Cross Fade (+3 dB)" (equal power).
