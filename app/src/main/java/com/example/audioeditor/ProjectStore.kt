@@ -34,9 +34,9 @@ data class ProjectData(
     val clips: List<SavedClip>,
     val videoTrackCount: Int = 1,
     val mutedTracks: Set<Int> = emptySet(),
-    val frameRate: String = FrameRate.F24.name,
-    val width: Int = 1920,
-    val height: Int = 1080,
+    val frameRate: String = DEFAULT_FRAME_RATE.name,
+    val width: Int = DEFAULT_WIDTH,
+    val height: Int = DEFAULT_HEIGHT,
 )
 
 object ProjectStore {
@@ -150,9 +150,9 @@ object ProjectStore {
         }
         return ProjectData(
             name, trackCount, playhead, sourcesList, clipsList, videoTrackCount, muted,
-            frameRate = json.optString("frameRate", FrameRate.F24.name),
-            width = json.optInt("width", 1920).coerceIn(MIN_RESOLUTION, MAX_RESOLUTION),
-            height = json.optInt("height", 1080).coerceIn(MIN_RESOLUTION, MAX_RESOLUTION),
+            frameRate = json.optString("frameRate", DEFAULT_FRAME_RATE.name),
+            width = json.optInt("width", DEFAULT_WIDTH).coerceIn(MIN_RESOLUTION, MAX_RESOLUTION),
+            height = json.optInt("height", DEFAULT_HEIGHT).coerceIn(MIN_RESOLUTION, MAX_RESOLUTION),
         )
     }
 

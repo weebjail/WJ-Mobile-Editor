@@ -82,9 +82,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     var projectName by mutableStateOf("Untitled"); private set
 
     /** Timeline frame rate and resolution, chosen when the project is created (editable in Settings). */
-    var frameRate by mutableStateOf(FrameRate.F24); private set
-    var timelineWidth by mutableIntStateOf(1920); private set
-    var timelineHeight by mutableIntStateOf(1080); private set
+    var frameRate by mutableStateOf(DEFAULT_FRAME_RATE); private set
+    var timelineWidth by mutableIntStateOf(DEFAULT_WIDTH); private set
+    var timelineHeight by mutableIntStateOf(DEFAULT_HEIGHT); private set
 
     fun setTimelineFormat(rate: FrameRate, width: Int, height: Int) {
         if (rate == frameRate && width == timelineWidth && height == timelineHeight) return
@@ -648,7 +648,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 trackCount = data.trackCount
                 videoTrackCount = data.videoTrackCount
                 mutedTracks = data.mutedTracks
-                frameRate = FrameRate.entries.find { it.name == data.frameRate } ?: FrameRate.F24
+                frameRate = FrameRate.entries.find { it.name == data.frameRate } ?: DEFAULT_FRAME_RATE
                 timelineWidth = data.width
                 timelineHeight = data.height
                 playhead = data.playhead

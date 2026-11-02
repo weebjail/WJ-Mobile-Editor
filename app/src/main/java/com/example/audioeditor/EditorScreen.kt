@@ -408,7 +408,7 @@ private fun TimelineFormatFields(s: FormatState) {
 @Composable
 private fun NewProjectDialog(vm: EditorViewModel, close: () -> Unit) {
     var name by remember { mutableStateOf("Untitled") }
-    val format = remember { FormatState(vm.frameRate, vm.timelineWidth, vm.timelineHeight) }
+    val format = remember { FormatState(DEFAULT_FRAME_RATE, DEFAULT_WIDTH, DEFAULT_HEIGHT) }
     AlertDialog(
         onDismissRequest = close,
         title = { Text("New project") },
