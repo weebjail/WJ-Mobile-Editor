@@ -45,13 +45,25 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Length of crossfades made with the crossfade button (Resolve's default is 1 second). */
     var crossfadeSeconds by mutableFloatStateOf(prefs.getFloat(KEY_XFADE, 1f)); private set
 
-    /** Sets the fade curve for new fades, and switches every fade and crossfade in the project to it (undoable). */
+    /**
+     * The fade curve is a setting, not an edit: every fade and crossfade always uses it. Changing it switches
+     * all clips over (not an undo step), and undo/redo/load re-apply it, so the project never ends up mixed.
+     */
     fun updateDefaultCurve(c: FadeCurve) {
         defaultCurve = c
         prefs.edit().putString(KEY_CURVE, c.name).apply()
-        val new = clips.map { it.copy(fadeIn = it.fadeIn.copy(curve = c), fadeOut = it.fadeOut.copy(curve = c)) }
-        if (new != clips) commit(new)
+        val new = withCurve(clips)
+        if (new.zip(clips).any { (n, o) -> n.audibleFades() != o.audibleFades() }) dirty = true
+        applyClips(new)
     }
+
+    private fun withCurve(list: List<Clip>): List<Clip> = list.map {
+        if (it.fadeIn.curve == defaultCurve && it.fadeOut.curve == defaultCurve) it
+        else it.copy(fadeIn = it.fadeIn.copy(curve = defaultCurve), fadeOut = it.fadeOut.copy(curve = defaultCurve))
+    }
+
+    /** Fades that actually change the sound (zero-length fades don't). */
+    private fun Clip.audibleFades() = listOf(fadeIn.takeIf { it.frames > 0 }, fadeOut.takeIf { it.frames > 0 })
 
     fun updateCrossfadeSeconds(s: Float) {
         crossfadeSeconds = s
@@ -118,8 +130,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     val selectedClip: Clip?
         get() {
             overrideSelectedId?.let { oid -> clips.find { it.id == oid }?.let { return it } }
+            // Inside a crossfade both clips are under the playhead; each owns its half, as on screen.
             return clips.filter { playhead >= it.start && playhead < it.end }
-                .minWithOrNull(compareBy<Clip> { it.video }.thenBy { it.track })
+                .minWithOrNull(
+                    compareBy<Clip> { it.video }.thenBy { it.track }
+                        .thenByDescending { minOf(playhead - it.start, it.end - playhead) }
+                )
         }
 
     /** A clip together with the clips linked to it (a video and its camera audio). */
@@ -167,7 +183,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun restore(s: Snapshot) {
         trackCount = s.trackCount
         videoTrackCount = s.videoTrackCount
-        applyClips(s.clips)
+        applyClips(withCurve(s.clips))
         refreshHistory()
         dirty = true
     }
@@ -262,7 +278,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 loadThumbnails(newSources.values)
             }
             busy = null
-            if (failures.isNotEmpty()) message = "Couldn't import: " + failures.joinToString("; ")
+            val mismatched = newSources.values.mapNotNull { s -> s.video?.let { FrameRate.closestTo(it.fps) } }
+                .filter { it != frameRate }.distinct()
+            message = listOfNotNull(
+                failures.takeIf { it.isNotEmpty() }?.let { "Couldn't import: " + it.joinToString("; ") },
+                mismatched.takeIf { it.isNotEmpty() }?.let { r ->
+                    "Video is ${r.joinToString(" / ") { it.label }} fps but the timeline is ${frameRate.label} fps. " +
+                        "You can change the timeline in Settings."
+                },
+            ).joinToString("\n").ifEmpty { null }
         }
     }
 
@@ -325,13 +349,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         var f = frame.coerceAtLeast(0L)
         var line: Long? = null
         if (snapEnabled) {
-            val threshold = (snapThresholdPx * samplesPerPx).toLong()
-            var best = threshold + 1
-            for (e in sequenceOf(0L) + clips.asSequence().flatMap { sequenceOf(it.start, it.end) }) {
-                val d = kotlin.math.abs(e - f)
-                if (d < best) { best = d; line = e }
-            }
-            line?.let { f = it }
+            val edges = ArrayList<Long>(clips.size * 2 + 1)
+            edges += 0L
+            for (c in clips) { edges += c.start; edges += c.end }
+            val (s, l) = TimelineOps.snap(f, 0L, edges, (snapThresholdPx * samplesPerPx).toLong())
+            f = s
+            line = l
         }
         seek(f)
         snapLine = line
@@ -648,9 +671,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 trackCount = data.trackCount
                 videoTrackCount = data.videoTrackCount
                 mutedTracks = data.mutedTracks
-                frameRate = FrameRate.entries.find { it.name == data.frameRate } ?: DEFAULT_FRAME_RATE
-                timelineWidth = data.width
-                timelineHeight = data.height
+                // Projects saved before the timeline format was stored take it from their first video.
+                val firstVideo = loadedClips.firstNotNullOfOrNull { c -> loaded[c.sourceId]?.video?.takeIf { c.video } }
+                frameRate = FrameRate.entries.find { it.name == data.frameRate }
+                    ?: firstVideo?.let { FrameRate.closestTo(it.fps) } ?: DEFAULT_FRAME_RATE
+                timelineWidth = data.width ?: firstVideo?.width?.coerceIn(MIN_RESOLUTION, MAX_RESOLUTION) ?: DEFAULT_WIDTH
+                timelineHeight = data.height ?: firstVideo?.height?.coerceIn(MIN_RESOLUTION, MAX_RESOLUTION) ?: DEFAULT_HEIGHT
                 playhead = data.playhead
                 scrollFrames = 0.0
                 overrideSelectedId = null
@@ -661,7 +687,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         .maxOrNull()?.plus(1) ?: 1L,
                 )
                 clearHistory()
-                applyClips(loadedClips)
+                applyClips(withCurve(loadedClips))
                 projectName = data.name
                 savedName = ProjectStore.safeName(name)
                 dirty = false

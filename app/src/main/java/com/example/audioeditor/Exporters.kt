@@ -168,14 +168,12 @@ object Exporters {
             val items = laneClips.sortedBy { it.start }.map { Item(it, it.start, it.end, it.fadeIn.frames > 0, it.fadeOut.frames > 0) }
             val xfades = HashMap<Int, Xfade>()   // crossfade after item i
             if (!isVideo) {
-                for (i in 0 until items.size - 1) {
+                for (i in TimelineOps.crossfadePairs(items.map { it.clip })) {
                     val a = items[i]; val b = items[i + 1]
-                    if (b.clip.start < a.clip.end) {
-                        val cut = (b.clip.start + a.clip.end) / 2
-                        a.end = cut; a.fadeOut = false
-                        b.start = cut; b.fadeIn = false
-                        xfades[i] = Xfade(b.clip.start, a.clip.end, a.clip.fadeOut.curve)
-                    }
+                    val cut = (b.clip.start + a.clip.end) / 2
+                    a.end = cut; a.fadeOut = false
+                    b.start = cut; b.fadeIn = false
+                    xfades[i] = Xfade(b.clip.start, a.clip.end, a.clip.fadeOut.curve)
                 }
             }
             for ((i, it) in items.withIndex()) {

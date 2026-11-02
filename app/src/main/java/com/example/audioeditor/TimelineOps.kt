@@ -169,6 +169,16 @@ object TimelineOps {
         return result
     }
 
+    /**
+     * Crossfades in one lane's clips: neighbours (by start time) where the next clip begins inside the
+     * previous one and runs past its end. Returns index pairs into [sorted], which must be sorted by start.
+     */
+    fun crossfadePairs(sorted: List<Clip>): List<Int> = (0 until sorted.size - 1).filter { i ->
+        val a = sorted[i]
+        val b = sorted[i + 1]
+        b.start > a.start && b.start < a.end && b.end > a.end
+    }
+
     /** True if [start, end) is free of clips in the given lane, ignoring clips in [ignore]. */
     fun laneFree(clips: List<Clip>, video: Boolean, track: Int, start: Long, end: Long, ignore: Set<Long>): Boolean =
         clips.none { it.video == video && it.track == track && it.id !in ignore && it.start < end && it.end > start }

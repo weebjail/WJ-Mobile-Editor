@@ -79,6 +79,11 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
     val headerW = with(density) { 40.dp.toPx() }
     var scrollY by remember { mutableFloatStateOf(0f) }
 
+    // Which clips to draw, and how crossfades split them. Worked out only when the clips change,
+    // not on every redraw (the playhead moves every frame during playback).
+    val preview = vm.dragPreview
+    val layout = remember(vm.clips, preview) { ClipLayout.of(vm.clips, preview) }
+
     fun frameAt(x: Float) = (vm.scrollFrames + (x - headerW) * vm.samplesPerPx).toLong().coerceAtLeast(0L)
     fun xOf(f: Long) = headerW + ((f - vm.scrollFrames) / vm.samplesPerPx).toFloat()
     fun laneAt(y: Float) = floor((y - rulerH + scrollY) / trackH).toInt()
@@ -106,8 +111,10 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     val onHeader = !onRuler && down.position.x < headerW
                     val hit = clipAt(down.position)
                     // Distance from the playhead line, kept while dragging so the playhead doesn't jump.
-                    val grabOffset = down.position.x - xOf(vm.playhead)
-                    val onPlayhead = !onRuler && !onHeader && abs(grabOffset) <= grabPx
+                    val playheadX = xOf(vm.playhead)
+                    val grabOffset = down.position.x - playheadX
+                    // Only when the playhead is actually visible (not scrolled under the track headers).
+                    val onPlayhead = !onRuler && !onHeader && playheadX >= headerW && abs(grabOffset) <= grabPx
                     var mode = if (onRuler) Mode.SCRUB else Mode.UNDECIDED
                     if (onRuler) vm.scrubTo(frameAt(down.position.x), snapPx)
                     var total = Offset.Zero
@@ -117,6 +124,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                         if (pressed.isEmpty()) break
                         if (pressed.size >= 2 || mode == Mode.PINCH) {
                             if (mode == Mode.MOVE) vm.cancelDrag()
+                            if (mode == Mode.SCRUB || mode == Mode.PLAYHEAD) vm.endScrub()
                             mode = Mode.PINCH
                             if (pressed.size >= 2) {
                                 val zoom = event.calculateZoom()
@@ -188,30 +196,12 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
         }
 
         // Clips
-        val preview = vm.dragPreview
-        val previewIds = preview?.map { it.id }?.toSet() ?: emptySet()
-        val list = if (preview != null) vm.clips.filter { it.id !in previewIds } + preview else vm.clips
+        val list = layout.list
+        val previewIds = layout.previewIds
+        val visStart = layout.visStart
+        val visEnd = layout.visEnd
         val selected = vm.selectedIds
         val waveColor = Color.White.copy(alpha = 0.7f)
-
-        // Where two audio clips in a lane overlap (a crossfade), each is drawn up to the middle of the overlap
-        // and the overlap itself is drawn as one transition block on top, like Resolve.
-        val visStart = HashMap<Long, Long>()
-        val visEnd = HashMap<Long, Long>()
-        val transitions = ArrayList<Pair<Clip, Clip>>()
-        for (laneClips in list.filter { !it.video && it.id !in previewIds }.groupBy { it.track }.values) {
-            val sorted = laneClips.sortedBy { it.start }
-            for (i in 0 until sorted.size - 1) {
-                val a = sorted[i]
-                val b = sorted[i + 1]
-                if (b.start < a.end && b.start > a.start && b.end > a.end) {
-                    val mid = (b.start + a.end) / 2
-                    visEnd[a.id] = min(visEnd[a.id] ?: a.end, mid)
-                    visStart[b.id] = max(visStart[b.id] ?: b.start, mid)
-                    transitions += a to b
-                }
-            }
-        }
 
         for (c in list) {
             val vs = visStart[c.id] ?: c.start
@@ -290,7 +280,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
         }
 
         // Crossfade blocks: one box over the overlap, with the outgoing and incoming curves crossing in an X.
-        for ((a, b) in transitions) {
+        for ((a, b) in layout.transitions) {
             val xs = xOf(b.start)
             val xe = xOf(a.end)
             if (xe < headerW || xs > w) continue
@@ -378,6 +368,41 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                 moveTo(px - 8.dp.toPx(), 0f); lineTo(px + 8.dp.toPx(), 0f); lineTo(px, 10.dp.toPx()); close()
             }
             drawPath(tri, PlayheadColor)
+        }
+    }
+}
+
+/**
+ * The clips to draw (with a drag preview standing in for the clips being dragged) and where crossfades split
+ * them: each clip in a crossfade is drawn up to the middle of the overlap, and the overlap itself is drawn as
+ * one transition block on top, like Resolve.
+ */
+private class ClipLayout(
+    val list: List<Clip>,
+    val previewIds: Set<Long>,
+    val visStart: Map<Long, Long>,
+    val visEnd: Map<Long, Long>,
+    val transitions: List<Pair<Clip, Clip>>,
+) {
+    companion object {
+        fun of(clips: List<Clip>, preview: List<Clip>?): ClipLayout {
+            val previewIds = preview?.map { it.id }?.toSet() ?: emptySet()
+            val list = if (preview != null) clips.filter { it.id !in previewIds } + preview else clips
+            val visStart = HashMap<Long, Long>()
+            val visEnd = HashMap<Long, Long>()
+            val transitions = ArrayList<Pair<Clip, Clip>>()
+            for (laneClips in list.filter { !it.video && it.id !in previewIds }.groupBy { it.track }.values) {
+                val sorted = laneClips.sortedBy { it.start }
+                for (i in TimelineOps.crossfadePairs(sorted)) {
+                    val a = sorted[i]
+                    val b = sorted[i + 1]
+                    val mid = (b.start + a.end) / 2
+                    visEnd[a.id] = min(visEnd[a.id] ?: a.end, mid)
+                    visStart[b.id] = max(visStart[b.id] ?: b.start, mid)
+                    transitions += a to b
+                }
+            }
+            return ClipLayout(list, previewIds, visStart, visEnd, transitions)
         }
     }
 }

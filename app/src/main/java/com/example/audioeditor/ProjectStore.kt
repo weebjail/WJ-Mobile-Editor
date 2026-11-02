@@ -34,9 +34,10 @@ data class ProjectData(
     val clips: List<SavedClip>,
     val videoTrackCount: Int = 1,
     val mutedTracks: Set<Int> = emptySet(),
-    val frameRate: String = DEFAULT_FRAME_RATE.name,
-    val width: Int = DEFAULT_WIDTH,
-    val height: Int = DEFAULT_HEIGHT,
+    // Timeline format; null in projects saved before it was stored.
+    val frameRate: String? = null,
+    val width: Int? = null,
+    val height: Int? = null,
 )
 
 object ProjectStore {
@@ -64,9 +65,9 @@ object ProjectStore {
             put("videoTrackCount", data.videoTrackCount)
             put("mutedTracks", JSONArray(data.mutedTracks.sorted()))
             put("playhead", data.playhead)
-            put("frameRate", data.frameRate)
-            put("width", data.width)
-            put("height", data.height)
+            data.frameRate?.let { put("frameRate", it) }
+            data.width?.let { put("width", it) }
+            data.height?.let { put("height", it) }
 
             val srcsArray = JSONArray()
             for (s in data.sources) {
@@ -150,9 +151,9 @@ object ProjectStore {
         }
         return ProjectData(
             name, trackCount, playhead, sourcesList, clipsList, videoTrackCount, muted,
-            frameRate = json.optString("frameRate", DEFAULT_FRAME_RATE.name),
-            width = json.optInt("width", DEFAULT_WIDTH).coerceIn(MIN_RESOLUTION, MAX_RESOLUTION),
-            height = json.optInt("height", DEFAULT_HEIGHT).coerceIn(MIN_RESOLUTION, MAX_RESOLUTION),
+            frameRate = if (json.has("frameRate")) json.getString("frameRate") else null,
+            width = if (json.has("width")) json.getInt("width").coerceIn(MIN_RESOLUTION, MAX_RESOLUTION) else null,
+            height = if (json.has("height")) json.getInt("height").coerceIn(MIN_RESOLUTION, MAX_RESOLUTION) else null,
         )
     }
 

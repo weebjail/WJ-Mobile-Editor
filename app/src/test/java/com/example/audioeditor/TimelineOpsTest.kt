@@ -86,6 +86,15 @@ class TimelineOpsTest {
         assertTrue(out.any { it.id == 2L && it.length == 10 * sec })
     }
 
+    @Test fun crossfadePairsFindOnlyPartialOverlaps() {
+        val a = Clip(1, 1, 0, 0, 0, 10 * sec)
+        val b = Clip(2, 1, 0, 9 * sec, 0, 10 * sec)        // starts inside a, ends after: crossfade
+        val c = Clip(3, 1, 0, 19 * sec, 0, 5 * sec)        // touches b: plain cut
+        assertEquals(listOf(0), TimelineOps.crossfadePairs(listOf(a, b, c)))
+        val inside = Clip(4, 1, 0, 2 * sec, 0, 3 * sec)    // wholly inside a: not a crossfade
+        assertEquals(emptyList<Int>(), TimelineOps.crossfadePairs(listOf(a, inside)))
+    }
+
     @Test fun projectNamesAreMadeSafe() {
         assertEquals("a_b_c", ProjectStore.safeName("a/b:c"))
         assertEquals("Untitled", ProjectStore.safeName("  ../  "))

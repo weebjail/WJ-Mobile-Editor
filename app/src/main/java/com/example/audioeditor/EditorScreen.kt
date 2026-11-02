@@ -435,9 +435,12 @@ private fun NewProjectDialog(vm: EditorViewModel, close: () -> Unit) {
 @Composable
 private fun SettingsDialog(vm: EditorViewModel, close: () -> Unit) {
     val format = remember { FormatState(vm.frameRate, vm.timelineWidth, vm.timelineHeight) }
+    // While width or height is invalid the dialog stays open (Done is disabled), so no change is silently lost.
     val done = {
-        if (format.valid) vm.setTimelineFormat(format.rate, format.w!!, format.h!!)
-        close()
+        if (format.valid) {
+            vm.setTimelineFormat(format.rate, format.w!!, format.h!!)
+            close()
+        }
     }
     AlertDialog(
         onDismissRequest = done,
@@ -477,7 +480,7 @@ private fun SettingsDialog(vm: EditorViewModel, close: () -> Unit) {
                 )
             }
         },
-        confirmButton = { TextButton(onClick = done) { Text("Done") } },
+        confirmButton = { TextButton(onClick = done, enabled = format.valid) { Text("Done") } },
     )
 }
 
