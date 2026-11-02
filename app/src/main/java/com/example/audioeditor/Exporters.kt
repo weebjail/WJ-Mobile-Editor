@@ -81,6 +81,8 @@ object Exporters {
         val mutedTracks: Set<Int>,
         val width: Int,
         val height: Int,
+        val lockedAudio: Set<Int> = emptySet(),
+        val lockedVideo: Set<Int> = emptySet(),
     )
 
     /**
@@ -163,7 +165,7 @@ object Exporters {
             sb.append("</media>\n</file>\n")
         }
 
-        fun lane(sb: StringBuilder, laneClips: List<Clip>, isVideo: Boolean, enabled: Boolean) {
+        fun lane(sb: StringBuilder, laneClips: List<Clip>, isVideo: Boolean, enabled: Boolean, locked: Boolean) {
             sb.append("<track>\n")
             val items = laneClips.sortedBy { it.start }.map { Item(it, it.start, it.end, it.fadeIn.frames > 0, it.fadeOut.frames > 0) }
             val xfades = HashMap<Int, Xfade>()   // crossfade after item i
@@ -206,7 +208,7 @@ object Exporters {
                     appendTransition(sb, rateXml, rate.toFrames(x.start), rate.toFrames(x.end), "center", x.curve)
                 }
             }
-            sb.append("<enabled>${if (enabled) "TRUE" else "FALSE"}</enabled><locked>FALSE</locked>\n</track>\n")
+            sb.append("<enabled>${if (enabled) "TRUE" else "FALSE"}</enabled><locked>${if (locked) "TRUE" else "FALSE"}</locked>\n</track>\n")
         }
 
         val sb = StringBuilder()
@@ -216,11 +218,11 @@ object Exporters {
         sb.append("<media>\n")
         sb.append("<video>\n<format><samplecharacteristics>$rateXml<width>$width</width><height>$height</height>")
         sb.append("<pixelaspectratio>square</pixelaspectratio></samplecharacteristics></format>\n")
-        for (v in 0 until t.videoTracks) lane(sb, t.clips.filter { it.video && it.track == v }, true, true)
+        for (v in 0 until t.videoTracks) lane(sb, t.clips.filter { it.video && it.track == v }, true, true, v in t.lockedVideo)
         sb.append("</video>\n")
         sb.append("<audio>\n<numOutputChannels>2</numOutputChannels>\n")
         sb.append("<format><samplecharacteristics><depth>24</depth><samplerate>$SAMPLE_RATE</samplerate></samplecharacteristics></format>\n")
-        for (a in 0 until t.audioTracks) lane(sb, t.clips.filter { !it.video && it.track == a }, false, a !in t.mutedTracks)
+        for (a in 0 until t.audioTracks) lane(sb, t.clips.filter { !it.video && it.track == a }, false, a !in t.mutedTracks, a in t.lockedAudio)
         sb.append("</audio>\n</media>\n</sequence>\n</xmeml>\n")
         return sb.toString()
     }

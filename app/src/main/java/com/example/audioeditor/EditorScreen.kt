@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -35,6 +36,8 @@ import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.JoinFull
 import androidx.compose.material.icons.filled.LastPage
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.LayersClear
 import androidx.compose.material.icons.filled.LibraryAdd
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -45,7 +48,7 @@ import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.HorizontalDivider
+
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -145,12 +148,6 @@ fun EditorScreen(vm: EditorViewModel) {
                 MenuBtn(Icons.AutoMirrored.Default.PlaylistAdd, "Tracks") { close ->
                     DropdownMenuItem(text = { Text("Add audio track") }, onClick = { close(); vm.addAudioTrack() })
                     DropdownMenuItem(text = { Text("Add video track") }, onClick = { close(); vm.addVideoTrack() })
-                    HorizontalDivider()
-                    DropdownMenuItem(
-                        text = { Text("Ripple all tracks") },
-                        leadingIcon = { Checkbox(checked = vm.rippleAllTracks, onCheckedChange = null) },
-                        onClick = { vm.updateRippleAllTracks(!vm.rippleAllTracks) },
-                    )
                 }
                 IconBtn(
                     if (vm.snapEnabled) Icons.Default.GridOn else Icons.Default.GridOff,
@@ -172,7 +169,11 @@ fun EditorScreen(vm: EditorViewModel) {
 
             if (vm.hasVideo) VideoPane(vm, Modifier.fillMaxWidth().fillMaxHeight(0.3f))
 
-            TimelineView(vm, Modifier.weight(1f).fillMaxWidth())
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                TimelineView(vm, Modifier.fillMaxSize())
+                // Corner above the track headers: ripple across all tracks on/off.
+                RippleAllToggle(vm, Modifier.size(TimelineHeaderWidth, TimelineRulerHeight))
+            }
 
             vm.fadeTarget?.let { FadePanel(vm, it) }
 
@@ -250,6 +251,31 @@ fun EditorScreen(vm: EditorViewModel) {
             },
             dismissButton = { TextButton(onClick = { dialog = Dialog.NONE }) { Text("Cancel") } },
         )
+    }
+}
+
+/**
+ * Symbol button: stacked layers = ripple edits affect every (unlocked) track; highlighted when on.
+ * Long-press shows its name, like the other buttons.
+ */
+@Composable
+private fun RippleAllToggle(vm: EditorViewModel, modifier: Modifier) {
+    val on = vm.rippleAllTracks
+    val label = if (on) "Ripple all tracks: on" else "Ripple all tracks: off"
+    Labeled(label) {
+        Box(
+            modifier
+                .background(if (on) MaterialTheme.colorScheme.primary else Color(0xFF2A2C32))
+                .clickable { vm.updateRippleAllTracks(!on) },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                if (on) Icons.Default.Layers else Icons.Default.LayersClear,
+                contentDescription = label,
+                tint = if (on) MaterialTheme.colorScheme.onPrimary else Color(0xFFB8BCC6),
+                modifier = Modifier.size(20.dp),
+            )
+        }
     }
 }
 

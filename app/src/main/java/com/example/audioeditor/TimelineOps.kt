@@ -59,22 +59,25 @@ object TimelineOps {
     /**
      * Ripple across all tracks: removes the time range [from, to) from every track (clips inside it are removed,
      * clips crossing its edges are cut there) and pulls everything after it left, so all tracks stay in sync.
+     * Clips for which [affects] is false (on locked tracks) are left exactly as they are.
      */
-    fun rippleRemoveRange(clips: List<Clip>, from: Long, to: Long, newId: () -> Long): List<Clip> {
+    fun rippleRemoveRange(
+        clips: List<Clip>, from: Long, to: Long, newId: () -> Long, affects: (Clip) -> Boolean = { true },
+    ): List<Clip> {
         if (to <= from) return clips
         var out = clips
         for (at in longArrayOf(from, to)) {
-            val targets = out.filter { at > it.start && at < it.end }
+            val targets = out.filter { at > it.start && at < it.end && affects(it) }
             for (t in targets) out = split(out, t, at, newId)
             // The right-hand pieces of a linked video + audio become their own linked pair (as with a cut).
             for (link in targets.mapNotNull { it.linkId }.toSet()) {
                 val fresh = newId()
-                out = out.map { if (it.linkId == link && it.start >= at) it.copy(linkId = fresh) else it }
+                out = out.map { if (it.linkId == link && it.start >= at && affects(it)) it.copy(linkId = fresh) else it }
             }
         }
         val d = to - from
-        return out.filter { it.start < from || it.end > to }
-            .map { if (it.start >= to) it.copy(start = it.start - d) else it }
+        return out.filter { !affects(it) || it.start < from || it.end > to }
+            .map { if (affects(it) && it.start >= to) it.copy(start = it.start - d) else it }
     }
 
     /** Shortest a clip can be trimmed to by dragging its edge (one video frame at 25 fps). */

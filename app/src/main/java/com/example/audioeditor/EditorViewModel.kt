@@ -86,6 +86,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     var trackCount by mutableIntStateOf(2); private set
     var videoTrackCount by mutableIntStateOf(1); private set
     var mutedTracks by mutableStateOf<Set<Int>>(emptySet()); private set
+    /** Locked audio / video tracks (like Resolve's lock button): their clips can't be selected or changed. */
+    var lockedAudio by mutableStateOf<Set<Int>>(emptySet()); private set
+    var lockedVideo by mutableStateOf<Set<Int>>(emptySet()); private set
     var overrideSelectedId by mutableStateOf<Long?>(null); private set
     var playhead by mutableLongStateOf(0L); private set
     var isPlaying by mutableStateOf(false); private set
@@ -132,14 +135,33 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun laneKind(lane: Int): Pair<Boolean, Int> =
         if (lane < videoTrackCount) true to (videoTrackCount - 1 - lane) else false to (lane - videoTrackCount)
 
+    // ------------------------------------------------------------ Track locks
+
+    fun isLocked(video: Boolean, track: Int): Boolean = track in (if (video) lockedVideo else lockedAudio)
+
+    /** Edits that span tracks (ripple all tracks) leave clips on locked tracks alone. */
+    private fun onUnlockedTrack(c: Clip): Boolean = !isLocked(c.video, c.track)
+
+    /** A clip can be edited when neither it nor any clip linked to it is on a locked track. */
+    fun isEditable(c: Clip): Boolean = group(c).none { isLocked(it.video, it.track) }
+
+    fun toggleLock(video: Boolean, track: Int) {
+        if (video) lockedVideo = if (track in lockedVideo) lockedVideo - track else lockedVideo + track
+        else lockedAudio = if (track in lockedAudio) lockedAudio - track else lockedAudio + track
+        dirty = true
+    }
+
     // ------------------------------------------------------------ Selection
 
-    /** The tapped clip if any; otherwise the clip under the playhead (audio before video, lowest track first). */
+    /**
+     * The tapped clip if any; otherwise the clip under the playhead (audio before video, lowest track first).
+     * Clips on locked tracks are never selected.
+     */
     val selectedClip: Clip?
         get() {
-            overrideSelectedId?.let { oid -> clips.find { it.id == oid }?.let { return it } }
+            overrideSelectedId?.let { oid -> clips.find { it.id == oid }?.takeIf(::isEditable)?.let { return it } }
             // Inside a crossfade both clips are under the playhead; each owns its half, as on screen.
-            return clips.filter { playhead >= it.start && playhead < it.end }
+            return clips.filter { playhead >= it.start && playhead < it.end && isEditable(it) }
                 .minWithOrNull(
                     compareBy<Clip> { it.video }.thenBy { it.track }
                         .thenByDescending { minOf(playhead - it.start, it.end - playhead) }
@@ -240,15 +262,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var tracks = trackCount
             val failures = mutableListOf<String>()
             val explicitTrack = overrideSelectedId?.let { id -> clips.find { it.id == id } }
-                ?.takeIf { !it.video && it.linkId == null }?.track
+                ?.takeIf { !it.video && it.linkId == null && isEditable(it) }?.track
 
-            /** First audio track holding only camera audio (or only recorder audio), adding one if needed. */
+            /**
+             * First unlocked audio track holding only camera audio (or only recorder audio), adding one if needed.
+             * New clips never go onto a locked track.
+             */
             fun pickTrack(camera: Boolean): Int {
                 for (t in 0 until tracks) {
+                    if (isLocked(false, t)) continue
                     if (working.filter { !it.video && it.track == t }.all { (it.linkId != null) == camera }) return t
                 }
-                return if (tracks < MAX_AUDIO_TRACKS) tracks++ else 0
+                if (tracks < MAX_AUDIO_TRACKS) return tracks++
+                return (0 until tracks).firstOrNull { !isLocked(false, it) } ?: 0
             }
+            var vTracks = videoTrackCount
+            val videoTrack = (0 until vTracks).firstOrNull { !isLocked(true, it) }
+                ?: if (vTracks < MAX_VIDEO_TRACKS) vTracks else 0
             fun laneEnd(video: Boolean, track: Int) =
                 working.filter { it.video == video && it.track == track }.maxOfOrNull { it.end } ?: 0L
 
@@ -261,9 +291,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 newSources[src.id] = src
                 if (src.video != null) {
                     val camTrack = if (src.hasAudio) pickTrack(camera = true) else -1
-                    val start = maxOf(laneEnd(true, 0), if (camTrack >= 0) laneEnd(false, camTrack) else 0L)
+                    if (videoTrack >= vTracks) vTracks = videoTrack + 1   // all video tracks locked: add one
+                    val start = maxOf(laneEnd(true, videoTrack), if (camTrack >= 0) laneEnd(false, camTrack) else 0L)
                     val link = if (camTrack >= 0) newId() else null
-                    working = working + Clip(newId(), src.id, 0, start, 0L, src.frames, video = true, linkId = link)
+                    working = working + Clip(newId(), src.id, videoTrack, start, 0L, src.frames, video = true, linkId = link)
                     if (camTrack >= 0) {
                         working = working + Clip(
                             newId(), src.id, camTrack, start, 0L, src.pcm!!.frames.coerceAtMost(src.frames),
@@ -282,6 +313,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 sources = sources + newSources
                 pushUndo()
                 trackCount = tracks
+                videoTrackCount = vTracks
                 applyClips(working)
                 loadThumbnails(newSources.values)
             }
@@ -380,7 +412,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun cut() {
         stop()
         val sel = selectedClip
-        val targets = if (sel != null && inside(sel)) group(sel).filter(::inside) else clips.filter(::inside)
+        val targets = if (sel != null && inside(sel)) group(sel).filter(::inside)
+        else clips.filter { inside(it) && isEditable(it) }
         if (targets.isEmpty()) { message = "Move the playhead over a clip to cut it"; return }
         var new = clips
         for (t in targets) new = TimelineOps.split(new, t, playhead, ::newId)
@@ -401,7 +434,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             // Remove that stretch of time from every track.
             val from = if (atStart) members.minOf { it.start } else playhead
             val to = if (atStart) playhead else members.maxOf { it.end }
-            val new = TimelineOps.rippleRemoveRange(clips, from, to, ::newId)
+            val new = TimelineOps.rippleRemoveRange(clips, from, to, ::newId, ::onUnlockedTrack)
             commit(new)
             playhead = from
             // Keep the trimmed clip selected: the piece now starting (or ending) at the edit point.
@@ -426,7 +459,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val members = group(sel)
         if (ripple && rippleAllTracks) {
             // Remove the clip's stretch of time from every track, keeping them all in sync.
-            commit(TimelineOps.rippleRemoveRange(clips, members.minOf { it.start }, members.maxOf { it.end }, ::newId))
+            commit(
+                TimelineOps.rippleRemoveRange(
+                    clips, members.minOf { it.start }, members.maxOf { it.end }, ::newId, ::onUnlockedTrack,
+                )
+            )
             return
         }
         var new = clips
@@ -489,7 +526,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun beginDrag(id: Long) {
         stop()
-        val c = clips.find { it.id == id } ?: return
+        val c = clips.find { it.id == id }?.takeIf(::isEditable) ?: return
         val g = group(c)
         dragOrigin = g
         dragLeadId = id
@@ -514,7 +551,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val delta = (start - lead.start).coerceAtLeast(-g.minOf { it.start })
         val (laneVideo, laneTrack) = laneKind(lane.coerceIn(0, laneCount - 1))
-        val newTrack = if (laneVideo == lead.video) laneTrack else lead.track
+        val newTrack = if (laneVideo == lead.video && !isLocked(laneVideo, laneTrack)) laneTrack else lead.track
         dragPreview = g.map { it.copy(start = it.start + delta, track = if (it.id == lead.id) newTrack else it.track) }
         snapLine = line
     }
@@ -544,7 +581,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Starts dragging the start or end edge of a clip; linked clips trim with it. */
     fun beginTrim(id: Long, atStart: Boolean) {
         stop()
-        val c = clips.find { it.id == id } ?: return
+        val c = clips.find { it.id == id }?.takeIf(::isEditable) ?: return
         val g = group(c)
         val ids = g.map { it.id }.toSet()
         // The edge can move only as far as every linked clip allows.
@@ -601,11 +638,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun syncToRecorder() {
         stop()
-        val chosen = overrideSelectedId?.let { id -> clips.find { it.id == id } }?.linkId
-        val groups = clips.filter { it.linkId != null }.groupBy { it.linkId!! }
+        val chosen = overrideSelectedId?.let { id -> clips.find { it.id == id } }?.takeIf(::isEditable)?.linkId
+        val allGroups = clips.filter { it.linkId != null }.groupBy { it.linkId!! }
             .filter { (link, g) -> (chosen == null || link == chosen) && g.any { it.video } && g.any { !it.video } }
+        // Videos on locked tracks stay where they are. (Recorder audio on a locked track can still be matched.)
+        val groups = allGroups.filter { (_, g) -> isEditable(g.first()) }
         val recorders = clips.filter { !it.video && it.linkId == null && sources[it.sourceId]?.pcm != null }
-        if (groups.isEmpty()) { message = "Import a video file with sound first"; return }
+        if (allGroups.isEmpty()) { message = "Import a video file with sound first"; return }
+        if (groups.isEmpty()) { message = "Those videos are on locked tracks. Unlock them to sync."; return }
         if (recorders.isEmpty()) { message = "Import the recorder's audio file first"; return }
 
         viewModelScope.launch {
@@ -640,8 +680,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (g.any { it.start + delta < 0 }) { problems += "$name (would start before 0:00)"; continue }
                 val placed = g.map { it.copy(start = it.start + delta) }.map { c ->
                     val count = if (c.video) vTracks else aTracks
-                    var track = (listOf(c.track) + (0 until count))
-                        .firstOrNull { TimelineOps.laneFree(new, c.video, it, c.start, c.end, ids) }
+                    var track = (listOf(c.track) + (0 until count)).firstOrNull {
+                        !isLocked(c.video, it) && TimelineOps.laneFree(new, c.video, it, c.start, c.end, ids)
+                    }
                     if (track == null && c.video && vTracks < MAX_VIDEO_TRACKS) track = vTracks++
                     if (track == null && !c.video && aTracks < MAX_AUDIO_TRACKS) track = aTracks++
                     track?.let { c.copy(track = it) }
@@ -690,7 +731,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             )
         },
         videoTrackCount, mutedTracks,
-        frameRate.name, timelineWidth, timelineHeight,
+        lockedAudio = lockedAudio, lockedVideo = lockedVideo,
+        frameRate = frameRate.name, width = timelineWidth, height = timelineHeight,
     )
 
     /** True if saving under [name] would replace a different, existing project. */
@@ -756,6 +798,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 trackCount = data.trackCount
                 videoTrackCount = data.videoTrackCount
                 mutedTracks = data.mutedTracks
+                lockedAudio = data.lockedAudio
+                lockedVideo = data.lockedVideo
                 // Projects saved before the timeline format was stored take it from their first video.
                 val firstVideo = loadedClips.firstNotNullOfOrNull { c -> loaded[c.sourceId]?.video?.takeIf { c.video } }
                 frameRate = FrameRate.entries.find { it.name == data.frameRate }
@@ -799,6 +843,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         trackCount = 2
         videoTrackCount = 1
         mutedTracks = emptySet()
+        lockedAudio = emptySet()
+        lockedVideo = emptySet()
         applyClips(emptyList())
         overrideSelectedId = null
         playhead = 0L
@@ -844,6 +890,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val rate = frameRate
         val timeline = Exporters.Timeline(
             name, clips, sources, trackCount, videoTrackCount, mutedTracks, timelineWidth, timelineHeight,
+            lockedAudio, lockedVideo,
         )
         viewModelScope.launch {
             busy = "Saving Resolve timeline…"

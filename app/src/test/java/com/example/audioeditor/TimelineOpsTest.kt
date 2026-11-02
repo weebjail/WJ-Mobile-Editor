@@ -116,6 +116,14 @@ class TimelineOpsTest {
         assertTrue(9L !in rightLinks)
     }
 
+    @Test fun rippleRemoveRangeLeavesLockedTracksAlone() {
+        val a = Clip(1, 1, 0, 0, 0, 20 * sec)
+        val locked = Clip(2, 2, 1, 0, 0, 20 * sec)
+        val out = TimelineOps.rippleRemoveRange(listOf(a, locked), 5 * sec, 10 * sec, ::newId) { it.track != 1 }
+        assertEquals(locked, out.single { it.id == 2L })                      // untouched
+        assertEquals(2, out.count { it.sourceId == 1L })                       // unlocked track was cut
+    }
+
     @Test fun trimRangeStopsAtMediaAndNeighbours() {
         val a = Clip(1, 1, 0, 0, sourceIn = 2 * sec, length = 5 * sec)
         val b = Clip(2, 1, 0, 8 * sec, 0, 5 * sec)

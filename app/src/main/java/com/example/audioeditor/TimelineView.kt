@@ -22,6 +22,12 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
@@ -58,11 +64,20 @@ private val SnapColor = Color(0xFFFFD54A)
 private val TransitionFill = Color(0xFF15161A).copy(alpha = 0.55f)
 private val TransitionEdge = Color(0xFFDADDE5)
 private val MuteOn = Color(0xFFE0B03A)
+private val LockOn = Color(0xFFE0675A)
+private val LockShade = Color.Black.copy(alpha = 0.35f)
 private val VideoClipColor = Color(0xFF35507A)
 private val ClipColors = listOf(Color(0xFF2F7A5C), Color(0xFF3B5DA3), Color(0xFF7D4FA3), Color(0xFFA0683A))
 private val RulerSteps = doubleArrayOf(
     0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0,
 )
+
+/** Size of the track-header column and the ruler; the corner where they meet holds the ripple-all button. */
+val TimelineHeaderWidth = 52.dp
+val TimelineRulerHeight = 28.dp
+
+private val HeaderButton = 20.dp
+private val HeaderGap = 4.dp
 
 /**
  * Gestures:
@@ -70,17 +85,21 @@ private val RulerSteps = doubleArrayOf(
  *    (it snaps to clip edges and cuts when snapping is on)
  *  - tap a clip: select it.  Tap empty space: deselect and move the playhead there
  *  - press and drag a clip: move it (and anything linked to it) in time, or to another track of the same kind
+ *  - press and drag a clip's edge: shorten or extend it
  *  - drag anywhere else: scroll.  Pinch with two fingers: zoom
- *  - tap an audio track's header (left edge): mute / unmute it
+ *  - track header (left edge): left half locks / unlocks the track, right half mutes / unmutes an audio track
+ *  Clips on locked tracks can't be selected or changed.
  */
 @Composable
 fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
     val textMeasurer = rememberTextMeasurer()
     val density = LocalDensity.current
-    val rulerH = with(density) { 28.dp.toPx() }
+    val rulerH = with(density) { TimelineRulerHeight.toPx() }
     val trackH = with(density) { 72.dp.toPx() }
-    val headerW = with(density) { 40.dp.toPx() }
+    val headerW = with(density) { TimelineHeaderWidth.toPx() }
     var scrollY by remember { mutableFloatStateOf(0f) }
+    val lockIcon = rememberVectorPainter(Icons.Default.Lock)
+    val unlockIcon = rememberVectorPainter(Icons.Default.LockOpen)
 
     // Which clips to draw, and how crossfades split them. Worked out only when the clips change,
     // not on every redraw (the playhead moves every frame during playback).
@@ -95,9 +114,10 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
         val lane = laneAt(p.y)
         if (lane !in 0 until vm.laneCount) return null
         val (video, track) = vm.laneKind(lane)
+        if (vm.isLocked(video, track)) return null
         val f = frameAt(p.x)
         // Where two clips overlap (a crossfade), each owns its half, matching how they're drawn.
-        return vm.clips.filter { it.video == video && it.track == track && f >= it.start && f < it.end }
+        return vm.clips.filter { it.video == video && it.track == track && f >= it.start && f < it.end && vm.isEditable(it) }
             .maxByOrNull { min(f - it.start, it.end - f) }
     }
 
@@ -110,10 +130,11 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
         val lane = laneAt(p.y)
         if (lane !in 0 until vm.laneCount) return null
         val (video, track) = vm.laneKind(lane)
+        if (vm.isLocked(video, track)) return null
         var best: EdgeHit? = null
         var bestScore = Float.MAX_VALUE
         for (c in vm.clips) {
-            if (c.video != video || c.track != track) continue
+            if (c.video != video || c.track != track || !vm.isEditable(c)) continue
             // On short clips keep the middle free for moving the clip.
             val zone = min(zonePx, (xOf(c.end) - xOf(c.start)) / 3f)
             for (atStart in booleanArrayOf(true, false)) {
@@ -205,7 +226,9 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                                 val lane = laneAt(down.position.y)
                                 if (lane in 0 until vm.laneCount) {
                                     val (video, track) = vm.laneKind(lane)
-                                    if (!video) vm.toggleMute(track)
+                                    // Left half: lock button.  Right half: mute button (audio tracks only).
+                                    if (down.position.x < headerW / 2 || video) vm.toggleLock(video, track)
+                                    else vm.toggleMute(track)
                                 }
                             }
                             hit != null -> vm.select(hit.id)
@@ -362,20 +385,40 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
             drawLine(SnapColor, Offset(x, rulerH), Offset(x, h), strokeWidth = 2.dp.toPx())
         }
 
-        // Track headers: V1, A1… and the mute button for audio tracks
+        // Locked tracks are shaded over, so it's clear their clips can't be touched.
+        for (lane in 0 until vm.laneCount) {
+            val (video, track) = vm.laneKind(lane)
+            if (!vm.isLocked(video, track)) continue
+            val top = rulerH + lane * trackH - scrollY
+            drawRect(LockShade, Offset(headerW, top), Size(w - headerW, trackH))
+        }
+
+        // Track headers: V1, A1…, a lock button on every track, and a mute button on audio tracks
         drawRect(HeaderBg, Offset(0f, rulerH), Size(headerW, h - rulerH))
+        val box = HeaderButton.toPx()
+        val gap = HeaderGap.toPx()
         for (lane in 0 until vm.laneCount) {
             val top = rulerH + lane * trackH - scrollY
             val (video, track) = vm.laneKind(lane)
             drawText(
-                textMeasurer, (if (video) "V" else "A") + (track + 1), Offset(8f, top + 8f),
+                textMeasurer, (if (video) "V" else "A") + (track + 1), Offset(gap * 2, top + 8f),
                 TextStyle(color = TextDim, fontSize = 11.sp, fontWeight = FontWeight.Bold),
             )
+            val by = top + trackH - box - 8.dp.toPx()
+            val locked = vm.isLocked(video, track)
+            drawRoundRect(
+                if (locked) LockOn else TextDim.copy(alpha = 0.25f),
+                Offset(gap, by), Size(box, box), CornerRadius(6f),
+            )
+            val inset = 3.dp.toPx()
+            translate(gap + inset, by + inset) {
+                with(if (locked) lockIcon else unlockIcon) {
+                    draw(Size(box - inset * 2, box - inset * 2), colorFilter = ColorFilter.tint(if (locked) Color.Black else TextDim))
+                }
+            }
             if (!video) {
                 val muted = track in vm.mutedTracks
-                val box = 22.dp.toPx()
-                val bx = (headerW - box) / 2
-                val by = top + trackH - box - 8.dp.toPx()
+                val bx = gap * 2 + box
                 drawRoundRect(
                     if (muted) MuteOn else TextDim.copy(alpha = 0.25f),
                     Offset(bx, by), Size(box, box), CornerRadius(6f),

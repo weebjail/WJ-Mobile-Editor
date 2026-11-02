@@ -34,6 +34,8 @@ data class ProjectData(
     val clips: List<SavedClip>,
     val videoTrackCount: Int = 1,
     val mutedTracks: Set<Int> = emptySet(),
+    val lockedAudio: Set<Int> = emptySet(),
+    val lockedVideo: Set<Int> = emptySet(),
     // Timeline format; null in projects saved before it was stored.
     val frameRate: String? = null,
     val width: Int? = null,
@@ -64,6 +66,8 @@ object ProjectStore {
             put("trackCount", data.trackCount)
             put("videoTrackCount", data.videoTrackCount)
             put("mutedTracks", JSONArray(data.mutedTracks.sorted()))
+            put("lockedAudio", JSONArray(data.lockedAudio.sorted()))
+            put("lockedVideo", JSONArray(data.lockedVideo.sorted()))
             put("playhead", data.playhead)
             data.frameRate?.let { put("frameRate", it) }
             data.width?.let { put("width", it) }
@@ -116,8 +120,12 @@ object ProjectStore {
         val trackCount = json.optInt("trackCount", 2).coerceIn(1, MAX_AUDIO_TRACKS)
         val videoTrackCount = json.optInt("videoTrackCount", 1).coerceIn(1, MAX_VIDEO_TRACKS)
         val playhead = json.optLong("playhead", 0L).coerceAtLeast(0L)
-        val muted = HashSet<Int>()
-        json.optJSONArray("mutedTracks")?.let { a -> for (i in 0 until a.length()) muted += a.getInt(i) }
+        fun intSet(key: String): Set<Int> {
+            val out = HashSet<Int>()
+            json.optJSONArray(key)?.let { a -> for (i in 0 until a.length()) out += a.getInt(i) }
+            return out
+        }
+        val muted = intSet("mutedTracks")
 
         val sourcesList = mutableListOf<SavedSource>()
         val srcsArray = json.optJSONArray("sources") ?: JSONArray()
@@ -151,6 +159,8 @@ object ProjectStore {
         }
         return ProjectData(
             name, trackCount, playhead, sourcesList, clipsList, videoTrackCount, muted,
+            lockedAudio = intSet("lockedAudio"),
+            lockedVideo = intSet("lockedVideo"),
             frameRate = if (json.has("frameRate")) json.getString("frameRate") else null,
             width = if (json.has("width")) json.getInt("width").coerceIn(MIN_RESOLUTION, MAX_RESOLUTION) else null,
             height = if (json.has("height")) json.getInt("height").coerceIn(MIN_RESOLUTION, MAX_RESOLUTION) else null,
