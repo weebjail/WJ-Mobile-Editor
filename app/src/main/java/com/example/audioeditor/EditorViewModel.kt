@@ -65,6 +65,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Fades that actually change the sound (zero-length fades don't). */
     private fun Clip.audibleFades() = listOf(fadeIn.takeIf { it.frames > 0 }, fadeOut.takeIf { it.frames > 0 })
 
+    /** When on, ripple delete and ripple trims remove the time from every track, not just the clip's own. */
+    var rippleAllTracks by mutableStateOf(prefs.getBoolean(KEY_RIPPLE_ALL, false)); private set
+
+    fun updateRippleAllTracks(on: Boolean) {
+        rippleAllTracks = on
+        prefs.edit().putBoolean(KEY_RIPPLE_ALL, on).apply()
+    }
+
     fun updateCrossfadeSeconds(s: Float) {
         crossfadeSeconds = s
         prefs.edit().putFloat(KEY_XFADE, s).apply()
@@ -389,6 +397,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val t = selectedClip ?: run { message = "Move the playhead over a clip first"; return }
         val members = group(t).filter(::inside)
         if (members.isEmpty()) { message = "Move the playhead inside the clip to trim it"; return }
+        if (rippleAllTracks) {
+            // Remove that stretch of time from every track.
+            val from = if (atStart) members.minOf { it.start } else playhead
+            val to = if (atStart) playhead else members.maxOf { it.end }
+            val new = TimelineOps.rippleRemoveRange(clips, from, to, ::newId)
+            commit(new)
+            playhead = from
+            // Keep the trimmed clip selected: the piece now starting (or ending) at the edit point.
+            overrideSelectedId = new.firstOrNull { it.sameLane(t) && (if (atStart) it.start == from else it.end == from) }?.id
+            return
+        }
         var new = clips
         for (m in members) {
             new = if (atStart) TimelineOps.rippleTrimStart(new, m, playhead) else TimelineOps.rippleTrimEnd(new, m, playhead)
@@ -404,8 +423,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteSelected(ripple: Boolean) {
         val sel = selectedClip ?: run { message = "Tap a clip to select it first"; return }
         stop()
+        val members = group(sel)
+        if (ripple && rippleAllTracks) {
+            // Remove the clip's stretch of time from every track, keeping them all in sync.
+            commit(TimelineOps.rippleRemoveRange(clips, members.minOf { it.start }, members.maxOf { it.end }, ::newId))
+            return
+        }
         var new = clips
-        for (c in group(sel)) new = if (ripple) TimelineOps.rippleDelete(new, c) else TimelineOps.delete(new, c)
+        for (c in members) new = if (ripple) TimelineOps.rippleDelete(new, c) else TimelineOps.delete(new, c)
         commit(new)
     }
 
@@ -506,6 +531,66 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun cancelDrag() { dragPreview = null; dragOrigin = null; snapLine = null }
+
+    // ------------------------------------------------------------ Trimming by dragging a clip's edge
+
+    private var trimAtStart = false
+    private var trimRange = 0L..0L
+
+    /** Media available in a clip's source file (its audio for audio clips). */
+    private fun sourceFramesOf(c: Clip): Long =
+        sources[c.sourceId]?.let { if (c.video) it.frames else it.pcm?.frames ?: it.frames } ?: (c.sourceIn + c.length)
+
+    /** Starts dragging the start or end edge of a clip; linked clips trim with it. */
+    fun beginTrim(id: Long, atStart: Boolean) {
+        stop()
+        val c = clips.find { it.id == id } ?: return
+        val g = group(c)
+        val ids = g.map { it.id }.toSet()
+        // The edge can move only as far as every linked clip allows.
+        var lo = Long.MIN_VALUE
+        var hi = Long.MAX_VALUE
+        for (m in g) {
+            val r = TimelineOps.trimRange(clips, m, atStart, sourceFramesOf(m), ids)
+            lo = maxOf(lo, r.first)
+            hi = minOf(hi, r.last)
+        }
+        trimRange = if (lo <= 0 && hi >= 0) lo..hi else 0L..0L
+        trimAtStart = atStart
+        dragOrigin = g
+        dragLeadId = id
+        dragPreview = g
+        overrideSelectedId = id
+    }
+
+    fun trimTo(totalDxPx: Float, snapThresholdPx: Float) {
+        val g = dragOrigin ?: return
+        val lead = g.first { it.id == dragLeadId }
+        val edge = if (trimAtStart) lead.start else lead.end
+        var d = (totalDxPx * samplesPerPx).toLong()
+        var line: Long? = null
+        if (snapEnabled) {
+            val ids = g.map { it.id }.toSet()
+            val edges = ArrayList<Long>()
+            edges += 0L
+            edges += playhead
+            for (c in clips) if (c.id !in ids) { edges += c.start; edges += c.end }
+            val (s, l) = TimelineOps.snap(edge + d, 0L, edges, (snapThresholdPx * samplesPerPx).toLong())
+            if (l != null && s - edge in trimRange) { d = s - edge; line = l }
+        }
+        d = d.coerceIn(trimRange)
+        dragPreview = g.map { TimelineOps.trimEdge(it, trimAtStart, d) }
+        snapLine = line
+    }
+
+    fun endTrim() {
+        val p = dragPreview ?: return
+        val o = dragOrigin
+        cancelDrag()
+        if (p == o) return
+        val byId = p.associateBy { it.id }
+        commit(clips.map { byId[it.id] ?: it })
+    }
 
     // ------------------------------------------------------------ Waveform sync
 
@@ -781,6 +866,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private companion object {
         const val KEY_CURVE = "defaultCurve"
         const val KEY_XFADE = "crossfadeSeconds"
+        const val KEY_RIPPLE_ALL = "rippleAllTracks"
         const val AUTOSAVE_NAME = "Autosave"
 
         /** Older projects called the curved fade "EXPONENTIAL". */

@@ -56,6 +56,51 @@ object TimelineOps {
         }
     }
 
+    /**
+     * Ripple across all tracks: removes the time range [from, to) from every track (clips inside it are removed,
+     * clips crossing its edges are cut there) and pulls everything after it left, so all tracks stay in sync.
+     */
+    fun rippleRemoveRange(clips: List<Clip>, from: Long, to: Long, newId: () -> Long): List<Clip> {
+        if (to <= from) return clips
+        var out = clips
+        for (at in longArrayOf(from, to)) {
+            val targets = out.filter { at > it.start && at < it.end }
+            for (t in targets) out = split(out, t, at, newId)
+            // The right-hand pieces of a linked video + audio become their own linked pair (as with a cut).
+            for (link in targets.mapNotNull { it.linkId }.toSet()) {
+                val fresh = newId()
+                out = out.map { if (it.linkId == link && it.start >= at) it.copy(linkId = fresh) else it }
+            }
+        }
+        val d = to - from
+        return out.filter { it.start < from || it.end > to }
+            .map { if (it.start >= to) it.copy(start = it.start - d) else it }
+    }
+
+    /** Shortest a clip can be trimmed to by dragging its edge (one video frame at 25 fps). */
+    const val MIN_TRIM_LENGTH = SAMPLE_RATE / 25L
+
+    /**
+     * How far (in frames, negative = left) the start or end edge of [c] can move when dragged: limited by
+     * the media in its source file, by the neighbouring clips in its lane (it can't be extended over them),
+     * and by a minimum length. Clips in [ignore] (e.g. clips linked to [c]) don't count as neighbours.
+     */
+    fun trimRange(clips: List<Clip>, c: Clip, atStart: Boolean, sourceFrames: Long, ignore: Set<Long>): LongRange {
+        val lane = clips.filter { it.sameLane(c) && it.id != c.id && it.id !in ignore }
+        return if (atStart) {
+            val prevLimit = lane.filter { it.start < c.start }.maxOfOrNull { minOf(it.end, c.start) } ?: 0L
+            maxOf(-c.sourceIn, prevLimit - c.start)..(c.length - MIN_TRIM_LENGTH)
+        } else {
+            val nextLimit = lane.filter { it.start > c.start }.minOfOrNull { maxOf(it.start, c.end) } ?: Long.MAX_VALUE
+            -(c.length - MIN_TRIM_LENGTH)..minOf(sourceFrames - (c.sourceIn + c.length), nextLimit - c.end)
+        }
+    }
+
+    /** Moves the start or end edge of [c] by [d] frames (the media stays in place, like Resolve's trim). */
+    fun trimEdge(c: Clip, atStart: Boolean, d: Long): Clip =
+        if (atStart) c.copy(start = c.start + d, sourceIn = c.sourceIn + d, length = c.length - d).withValidFades()
+        else c.copy(length = c.length + d).withValidFades()
+
     fun delete(clips: List<Clip>, target: Clip): List<Clip> = clips.filter { it.id != target.id }
 
     fun rippleDelete(clips: List<Clip>, target: Clip): List<Clip> =

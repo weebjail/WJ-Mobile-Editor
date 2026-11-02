@@ -41,7 +41,10 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-private enum class Mode { UNDECIDED, SCRUB, PLAYHEAD, MOVE, PAN, PINCH }
+private enum class Mode { UNDECIDED, SCRUB, PLAYHEAD, MOVE, TRIM, PAN, PINCH }
+
+/** A clip edge under the finger: which clip, which end, and how far the finger is from it (px). */
+private class EdgeHit(val clip: Clip, val atStart: Boolean, val distance: Float)
 
 private val Background = Color(0xFF1C1D21)
 private val TrackA = Color(0xFF24262B)
@@ -98,6 +101,33 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
             .maxByOrNull { min(f - it.start, it.end - f) }
     }
 
+    /**
+     * The clip edge nearest the finger, within [zonePx]. Where two clips touch, the side the finger is on
+     * decides: just left of a cut grabs the left clip's end, just right grabs the right clip's start.
+     */
+    fun edgeAt(p: Offset, zonePx: Float): EdgeHit? {
+        if (p.y < rulerH || p.x < headerW) return null
+        val lane = laneAt(p.y)
+        if (lane !in 0 until vm.laneCount) return null
+        val (video, track) = vm.laneKind(lane)
+        var best: EdgeHit? = null
+        var bestScore = Float.MAX_VALUE
+        for (c in vm.clips) {
+            if (c.video != video || c.track != track) continue
+            // On short clips keep the middle free for moving the clip.
+            val zone = min(zonePx, (xOf(c.end) - xOf(c.start)) / 3f)
+            for (atStart in booleanArrayOf(true, false)) {
+                val ex = xOf(if (atStart) c.start else c.end)
+                val d = abs(p.x - ex)
+                if (d > zone) continue
+                val onClipSide = if (atStart) p.x >= ex else p.x <= ex
+                val score = d + if (onClipSide) 0f else zonePx   // prefer the edge of the clip being touched
+                if (score < bestScore) { bestScore = score; best = EdgeHit(c, atStart, d) }
+            }
+        }
+        return best
+    }
+
     Canvas(
         modifier
             .clipToBounds()
@@ -105,6 +135,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
             .pointerInput(Unit) {
                 val snapPx = 14.dp.toPx()
                 val grabPx = 22.dp.toPx()
+                val trimPx = 16.dp.toPx()
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val onRuler = down.position.y < rulerH
@@ -114,7 +145,12 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     val playheadX = xOf(vm.playhead)
                     val grabOffset = down.position.x - playheadX
                     // Only when the playhead is actually visible (not scrolled under the track headers).
-                    val onPlayhead = !onRuler && !onHeader && playheadX >= headerW && abs(grabOffset) <= grabPx
+                    var onPlayhead = !onRuler && !onHeader && playheadX >= headerW && abs(grabOffset) <= grabPx
+                    // A clip edge under the finger can be dragged to trim. If the playhead is just as close,
+                    // the playhead wins (it can sit right on a cut); otherwise whichever is nearer.
+                    val edge = if (onRuler || onHeader) null else edgeAt(down.position, trimPx)
+                        ?.takeIf { !onPlayhead || it.distance < abs(grabOffset) }
+                    if (edge != null) onPlayhead = false
                     var mode = if (onRuler) Mode.SCRUB else Mode.UNDECIDED
                     if (onRuler) vm.scrubTo(frameAt(down.position.x), snapPx)
                     var total = Offset.Zero
@@ -123,7 +159,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                         val pressed = event.changes.filter { it.pressed }
                         if (pressed.isEmpty()) break
                         if (pressed.size >= 2 || mode == Mode.PINCH) {
-                            if (mode == Mode.MOVE) vm.cancelDrag()
+                            if (mode == Mode.MOVE || mode == Mode.TRIM) vm.cancelDrag()
                             if (mode == Mode.SCRUB || mode == Mode.PLAYHEAD) vm.endScrub()
                             mode = Mode.PINCH
                             if (pressed.size >= 2) {
@@ -141,6 +177,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                         if (mode == Mode.UNDECIDED && total.getDistance() > viewConfiguration.touchSlop) {
                             mode = when {
                                 onPlayhead -> Mode.PLAYHEAD
+                                edge != null -> { vm.beginTrim(edge.clip.id, edge.atStart); Mode.TRIM }
                                 hit != null -> { vm.beginDrag(hit.id); Mode.MOVE }
                                 else -> Mode.PAN
                             }
@@ -149,6 +186,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                             Mode.SCRUB -> vm.scrubTo(frameAt(ch.position.x), snapPx)
                             Mode.PLAYHEAD -> vm.scrubTo(frameAt(ch.position.x - grabOffset), snapPx)
                             Mode.MOVE -> vm.dragTo(total.x, laneAt(ch.position.y), snapPx)
+                            Mode.TRIM -> vm.trimTo(total.x, snapPx)
                             Mode.PAN -> {
                                 vm.scrollByPx(delta.x)
                                 val maxY = (rulerH + vm.laneCount * trackH - size.height).coerceAtLeast(0f)
@@ -160,6 +198,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     }
                     when (mode) {
                         Mode.MOVE -> vm.endDrag()
+                        Mode.TRIM -> vm.endTrim()
                         Mode.SCRUB, Mode.PLAYHEAD -> vm.endScrub()
                         Mode.UNDECIDED -> when {
                             onHeader -> {
@@ -276,6 +315,12 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     Color.White, Offset(x0, top), Size(x1 - x0, ch), CornerRadius(10f),
                     style = Stroke(width = 3.dp.toPx()),
                 )
+                // Trim handles: a hint that the edges can be dragged.
+                val hw = 4.dp.toPx()
+                val hh = ch * 0.4f
+                val hy = top + (ch - hh) / 2
+                if (vs == c.start) drawRoundRect(Color.White, Offset(x0, hy), Size(hw, hh), CornerRadius(hw / 2))
+                if (ve == c.end) drawRoundRect(Color.White, Offset(x1 - hw, hy), Size(hw, hh), CornerRadius(hw / 2))
             }
         }
 

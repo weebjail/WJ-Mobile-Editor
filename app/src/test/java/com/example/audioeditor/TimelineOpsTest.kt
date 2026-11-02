@@ -95,6 +95,43 @@ class TimelineOpsTest {
         assertEquals(emptyList<Int>(), TimelineOps.crossfadePairs(listOf(a, inside)))
     }
 
+    @Test fun rippleRemoveRangeKeepsAllTracksInSync() {
+        val video = Clip(1, 1, 0, 0, 0, 20 * sec, video = true, linkId = 9)
+        val cam = Clip(2, 1, 0, 0, 0, 20 * sec, linkId = 9)
+        val rec = Clip(3, 2, 1, 2 * sec, 0, 30 * sec)            // recorder, starts 2s in
+        val later = Clip(4, 3, 0, 25 * sec, 0, 5 * sec)          // after the removed range
+        val out = TimelineOps.rippleRemoveRange(listOf(video, cam, rec, later), 5 * sec, 10 * sec, ::newId)
+        // Every track loses 5..10s: each straddling clip becomes two pieces that now touch at 5s.
+        val camPieces = out.filter { !it.video && it.sourceId == 1L }.sortedBy { it.start }
+        assertEquals(listOf(0L, 5 * sec), camPieces.map { it.start })
+        assertEquals(listOf(5 * sec, 10 * sec), camPieces.map { it.length })
+        assertEquals(10 * sec, camPieces[1].sourceIn)
+        val recPieces = out.filter { it.sourceId == 2L }.sortedBy { it.start }
+        assertEquals(listOf(2 * sec, 5 * sec), recPieces.map { it.start })
+        assertEquals(8 * sec, recPieces[1].sourceIn)             // recorder media stays in sync with the camera
+        assertEquals(20 * sec, out.first { it.id == 4L }.start)   // later clip pulled left by 5s
+        // The right-hand video + camera pieces are linked to each other, not to the left-hand pieces.
+        val rightLinks = out.filter { it.sourceId == 1L && it.start == 5 * sec }.map { it.linkId }.toSet()
+        assertEquals(1, rightLinks.size)
+        assertTrue(9L !in rightLinks)
+    }
+
+    @Test fun trimRangeStopsAtMediaAndNeighbours() {
+        val a = Clip(1, 1, 0, 0, sourceIn = 2 * sec, length = 5 * sec)
+        val b = Clip(2, 1, 0, 8 * sec, 0, 5 * sec)
+        val clips = listOf(a, b)
+        // Start can extend back 2s (media before sourceIn), but not before 0:00.
+        assertEquals(0L, TimelineOps.trimRange(clips, a, true, 20 * sec, emptySet()).first)
+        // End can extend 3s, up to b.
+        assertEquals(3 * sec, TimelineOps.trimRange(clips, a, false, 20 * sec, emptySet()).last)
+        // b's start can't extend back at all: there's no media before its sourceIn of 0.
+        assertEquals(0L, TimelineOps.trimRange(clips, b, true, 20 * sec, emptySet()).first)
+        val trimmed = TimelineOps.trimEdge(a, atStart = true, d = sec)
+        assertEquals(sec, trimmed.start)
+        assertEquals(3 * sec, trimmed.sourceIn)
+        assertEquals(4 * sec, trimmed.length)
+    }
+
     @Test fun projectNamesAreMadeSafe() {
         assertEquals("a_b_c", ProjectStore.safeName("a/b:c"))
         assertEquals("Untitled", ProjectStore.safeName("  ../  "))

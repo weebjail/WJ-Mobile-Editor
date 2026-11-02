@@ -6,6 +6,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,6 +44,8 @@ import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -85,14 +88,10 @@ import androidx.media3.ui.PlayerView
 
 private enum class Dialog { NONE, SAVE, LOAD, RESOLVE, SETTINGS, CONFIRM_NEW, NEW_PROJECT }
 
-/** Common timeline resolutions offered as one-tap choices. */
+/** Quick resolution choices (landscape; the Vertical box swaps width and height). */
 private val ResolutionPresets = listOf(
-    "720p HD" to (1280 to 720),
-    "1080p HD" to (1920 to 1080),
-    "1440p" to (2560 to 1440),
-    "UHD 4K" to (3840 to 2160),
-    "DCI 4K" to (4096 to 2160),
-    "Vertical 1080" to (1080 to 1920),
+    "1080p" to (1920 to 1080),
+    "4K" to (3840 to 2160),
 )
 
 @Composable
@@ -143,9 +142,15 @@ fun EditorScreen(vm: EditorViewModel) {
                     DropdownMenuItem(text = { Text("Save project…") }, onClick = { close(); dialog = Dialog.SAVE })
                     DropdownMenuItem(text = { Text("Open project…") }, onClick = { close(); dialog = Dialog.LOAD })
                 }
-                MenuBtn(Icons.AutoMirrored.Default.PlaylistAdd, "Add track") { close ->
+                MenuBtn(Icons.AutoMirrored.Default.PlaylistAdd, "Tracks") { close ->
                     DropdownMenuItem(text = { Text("Add audio track") }, onClick = { close(); vm.addAudioTrack() })
                     DropdownMenuItem(text = { Text("Add video track") }, onClick = { close(); vm.addVideoTrack() })
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("Ripple all tracks") },
+                        leadingIcon = { Checkbox(checked = vm.rippleAllTracks, onCheckedChange = null) },
+                        onClick = { vm.updateRippleAllTracks(!vm.rippleAllTracks) },
+                    )
                 }
                 IconBtn(
                     if (vm.snapEnabled) Icons.Default.GridOn else Icons.Default.GridOff,
@@ -364,6 +369,25 @@ private class FormatState(rate: FrameRate, width: Int, height: Int) {
     val w: Int? get() = width.toIntOrNull()?.takeIf { it in MIN_RESOLUTION..MAX_RESOLUTION }
     val h: Int? get() = height.toIntOrNull()?.takeIf { it in MIN_RESOLUTION..MAX_RESOLUTION }
     val valid: Boolean get() = w != null && h != null
+    var vertical by mutableStateOf(height > width); private set
+
+    fun changeVertical(on: Boolean) {
+        if (on == vertical) return
+        vertical = on
+        // Turn the picture on its side: swap width and height.
+        val oldW = width
+        width = height
+        height = oldW
+    }
+
+    fun pick(preset: Pair<Int, Int>) {
+        val (long, short) = preset
+        width = (if (vertical) short else long).toString()
+        height = (if (vertical) long else short).toString()
+    }
+
+    fun isPreset(preset: Pair<Int, Int>): Boolean =
+        if (vertical) w == preset.second && h == preset.first else w == preset.first && h == preset.second
 }
 
 @Composable
@@ -375,13 +399,16 @@ private fun TimelineFormatFields(s: FormatState) {
         }
     }
     Text("Timeline resolution", style = MaterialTheme.typography.titleSmall)
-    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         ResolutionPresets.forEach { (label, size) ->
-            FilterChip(
-                selected = s.w == size.first && s.h == size.second,
-                onClick = { s.width = size.first.toString(); s.height = size.second.toString() },
-                label = { Text(label) },
-            )
+            FilterChip(selected = s.isPreset(size), onClick = { s.pick(size) }, label = { Text(label) })
+        }
+        Row(
+            Modifier.clickable { s.changeVertical(!s.vertical) }.padding(end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Checkbox(checked = s.vertical, onCheckedChange = { s.changeVertical(it) })
+            Text("Vertical")
         }
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
