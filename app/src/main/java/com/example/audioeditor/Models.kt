@@ -32,7 +32,7 @@ enum class FadeCurve(val label: String) { LINEAR("Lin"), CURVED("Exp") }
 
 data class Fade(val frames: Long = 0L, val curve: FadeCurve = FadeCurve.CURVED)
 
-/** An imported media file. Its audio (if any) is decoded to 48 kHz stereo float PCM in a cache file. */
+/** An imported media file. Its audio (if any) is read as 48 kHz stereo, from the file itself (WAV) or a decode cache. */
 class AudioSource(
     val id: Long,
     val uri: Uri,
