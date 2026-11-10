@@ -59,6 +59,53 @@ object ProjectStore {
         return files.filter { it.extension == "json" }.map { it.nameWithoutExtension }.sortedBy { it.lowercase() }
     }
 
+    // ---------------------------------------------------------------- Project list details
+
+    /**
+     * A saved project as shown in the Open dialog. [mediaBytes] is the total size of the media files it uses
+     * (they stay where they are on the phone); [missingMedia] counts the ones that can't be found.
+     */
+    data class Info(val name: String, val lastOpened: Long, val mediaBytes: Long, val missingMedia: Int)
+
+    private fun openedTimes(context: Context) = context.getSharedPreferences("project_opened", Context.MODE_PRIVATE)
+
+    /** Records that a project was opened (or saved) now. */
+    fun markOpened(context: Context, name: String) {
+        openedTimes(context).edit().putLong(safeName(name), System.currentTimeMillis()).apply()
+    }
+
+    /** All saved projects, most recently opened first. Reads every project and media file size: call off the main thread. */
+    fun listInfo(context: Context): List<Info> {
+        val times = openedTimes(context)
+        val sizes = HashMap<String, Long?>()   // media shared by several projects is only looked up once
+        return listProjects(context).map { name ->
+            val file = file(context, name)
+            val sources = try { load(context, name)?.sources.orEmpty() } catch (_: Exception) { emptyList() }
+            var bytes = 0L
+            var missing = 0
+            for (uri in sources.map { it.uriString }.distinct()) {
+                val size = sizes.getOrPut(uri) { mediaSize(context, uri) }
+                if (size == null) missing++ else bytes += size
+            }
+            // Projects not opened since this was added show when they were last saved.
+            Info(name, times.getLong(name, file.lastModified()), bytes, missing)
+        }.sortedByDescending { it.lastOpened }
+    }
+
+    /** Size of a media file in bytes, or null if it can't be found. */
+    private fun mediaSize(context: Context, uriString: String): Long? = try {
+        val uri = android.net.Uri.parse(uriString)
+        if (uri.scheme == "file") {
+            uri.path?.let { File(it) }?.takeIf { it.exists() }?.length()
+        } else {
+            context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else null
+            }
+        }
+    } catch (_: Exception) {
+        null   // deleted, moved, or permission lost
+    }
+
     fun save(context: Context, data: ProjectData) {
         val json = JSONObject().apply {
             put("version", 2)
@@ -169,5 +216,6 @@ object ProjectStore {
 
     fun delete(context: Context, projectName: String) {
         file(context, projectName).delete()
+        openedTimes(context).edit().remove(safeName(projectName)).apply()
     }
 }

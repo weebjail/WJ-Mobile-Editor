@@ -68,6 +68,7 @@ import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -88,6 +89,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private enum class Dialog { NONE, SAVE, LOAD, RESOLVE, SETTINGS, CONFIRM_NEW, NEW_PROJECT }
 
@@ -326,9 +329,13 @@ private fun SaveDialog(vm: EditorViewModel, close: () -> Unit) {
 
 @Composable
 private fun LoadDialog(vm: EditorViewModel, close: () -> Unit) {
-    var projects by remember { mutableStateOf(vm.listProjects()) }
+    // Looking up media sizes touches every file, so the list is read in the background.
+    var projects by remember { mutableStateOf<List<ProjectStore.Info>?>(null) }
+    var refresh by remember { mutableIntStateOf(0) }
+    LaunchedEffect(refresh) { projects = withContext(Dispatchers.IO) { vm.projectInfo() } }
     var confirmDelete by remember { mutableStateOf<String?>(null) }
     var confirmOpen by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
 
     confirmDelete?.let { p ->
         AlertDialog(
@@ -337,7 +344,7 @@ private fun LoadDialog(vm: EditorViewModel, close: () -> Unit) {
             text = { Text("The project file is deleted permanently. Your media files are not affected.") },
             confirmButton = {
                 TextButton(onClick = {
-                    vm.deleteProject(p); projects = vm.listProjects(); confirmDelete = null
+                    vm.deleteProject(p); refresh++; confirmDelete = null
                 }) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel") } },
@@ -359,11 +366,13 @@ private fun LoadDialog(vm: EditorViewModel, close: () -> Unit) {
         onDismissRequest = close,
         title = { Text("Open project") },
         text = {
-            if (projects.isEmpty()) {
-                Text("No saved projects yet.")
-            } else {
-                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    projects.forEach { p ->
+            val list = projects
+            when {
+                list == null -> Text("Loading…")
+                list.isEmpty() -> Text("No saved projects yet.")
+                else -> Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    list.forEach { info ->
+                        val p = info.name
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -373,7 +382,14 @@ private fun LoadDialog(vm: EditorViewModel, close: () -> Unit) {
                                 onClick = { if (vm.dirty) confirmOpen = p else { close(); vm.loadProject(p) } },
                                 modifier = Modifier.weight(1f),
                             ) {
-                                Text(p, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.fillMaxWidth())
+                                Column(Modifier.fillMaxWidth()) {
+                                    Text(p, style = MaterialTheme.typography.bodyLarge)
+                                    Text(
+                                        projectDetails(context, info),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                             IconButton(onClick = { confirmDelete = p }) {
                                 Icon(Icons.Default.Delete, contentDescription = "Delete project $p")
@@ -385,6 +401,22 @@ private fun LoadDialog(vm: EditorViewModel, close: () -> Unit) {
         },
         confirmButton = { TextButton(onClick = close) { Text("Close") } },
     )
+}
+
+/** Two lines, e.g. "Opened 10 Nov 2026, 14:23" and "1.2 GB of media · 1 file missing", in the phone's own format. */
+private fun projectDetails(context: android.content.Context, info: ProjectStore.Info): String {
+    val date = android.text.format.DateUtils.formatDateTime(
+        context, info.lastOpened,
+        android.text.format.DateUtils.FORMAT_SHOW_DATE or android.text.format.DateUtils.FORMAT_SHOW_YEAR or
+            android.text.format.DateUtils.FORMAT_ABBREV_MONTH or android.text.format.DateUtils.FORMAT_SHOW_TIME,
+    )
+    val size = android.text.format.Formatter.formatShortFileSize(context, info.mediaBytes)
+    val missing = when (info.missingMedia) {
+        0 -> ""
+        1 -> " · 1 file missing"
+        else -> " · ${info.missingMedia} files missing"
+    }
+    return "Opened $date\n$size of media$missing"
 }
 
 /** Editable timeline format, kept as text while typing. Valid only when both sides are in range. */

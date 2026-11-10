@@ -427,6 +427,28 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun rippleTrim(atStart: Boolean) {
         stop()
+        val before = playhead
+        try {
+            rippleTrimEdit(atStart)
+        } finally {
+            followPlayhead(before)
+        }
+    }
+
+    /**
+     * After an edit moves the playhead from [from], scrolls the timeline by the same amount, so the playhead and
+     * the material around it stay where they were on screen. A playhead that ends up off screen is brought back.
+     */
+    private fun followPlayhead(from: Long) {
+        if (playhead == from) return
+        scrollFrames = (scrollFrames + (playhead - from)).coerceAtLeast(0.0)
+        val x = (playhead - scrollFrames) / samplesPerPx
+        if (x < 0 || x > viewWidthPx) {
+            scrollFrames = (playhead - viewWidthPx * 0.15 * samplesPerPx).coerceAtLeast(0.0)
+        }
+    }
+
+    private fun rippleTrimEdit(atStart: Boolean) {
         val t = selectedClip ?: run { message = "Move the playhead over a clip first"; return }
         val members = group(t).filter(::inside)
         if (members.isEmpty()) { message = "Move the playhead inside the clip to trim it"; return }
@@ -745,6 +767,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val safe = ProjectStore.safeName(name)
         try {
             ProjectStore.save(ctx, projectData(safe))
+            ProjectStore.markOpened(ctx, safe)
             projectName = safe
             savedName = safe
             dirty = false
@@ -820,6 +843,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 projectName = data.name
                 savedName = ProjectStore.safeName(name)
                 dirty = false
+                ProjectStore.markOpened(ctx, name)
                 loadThumbnails(loaded.values)
                 message = if (missing.isEmpty()) "Loaded '${data.name}'"
                 else "Loaded '${data.name}', but couldn't open: ${missing.joinToString(", ")}. " +
@@ -855,7 +879,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         message = "New project started (${rate.label} fps, ${width}×$height)"
     }
 
-    fun listProjects(): List<String> = ProjectStore.listProjects(ctx)
+    /** Saved projects with when they were last opened and the size of their media. Slow-ish: call off the main thread. */
+    fun projectInfo(): List<ProjectStore.Info> = ProjectStore.listInfo(ctx)
 
     fun deleteProject(name: String) {
         ProjectStore.delete(ctx, name)
