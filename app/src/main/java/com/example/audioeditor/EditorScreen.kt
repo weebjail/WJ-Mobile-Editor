@@ -106,6 +106,7 @@ fun EditorScreen(vm: EditorViewModel) {
     var dialog by remember { mutableStateOf(Dialog.NONE) }
 
     var exportName by remember { mutableStateOf("") }
+    var exportOtio by remember { mutableStateOf(false) }   // Resolve export as OpenTimelineIO instead of XML
 
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
         if (it.isNotEmpty()) vm.importFiles(it)
@@ -167,6 +168,13 @@ fun EditorScreen(vm: EditorViewModel) {
                     DropdownMenuItem(text = { Text("Export DaVinci Resolve timeline (XML)") }, onClick = {
                         close()
                         exportName = vm.projectName
+                        exportOtio = false
+                        dialog = Dialog.RESOLVE
+                    })
+                    DropdownMenuItem(text = { Text("Export DaVinci Resolve timeline (OTIO)") }, onClick = {
+                        close()
+                        exportName = vm.projectName
+                        exportOtio = true
                         dialog = Dialog.RESOLVE
                     })
                 }
@@ -231,11 +239,12 @@ fun EditorScreen(vm: EditorViewModel) {
         )
         Dialog.RESOLVE -> AlertDialog(
             onDismissRequest = { dialog = Dialog.NONE },
-            title = { Text("Export for DaVinci Resolve") },
+            title = { Text(if (exportOtio) "Export for DaVinci Resolve (OTIO)" else "Export for DaVinci Resolve (XML)") },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        "Saves the timeline as .xml (any Resolve version) or .otio (OpenTimelineIO, Resolve 18.5 and later). " +
+                        (if (exportOtio) "Saves the timeline as an OpenTimelineIO (.otio) file, for Resolve 18.5 and later. "
+                        else "Saves the timeline as an .xml file, for any Resolve version. ") +
                             "Your media isn't copied: Resolve uses your original files. Copy them and the timeline file " +
                             "to your computer."
                     )
@@ -253,23 +262,22 @@ fun EditorScreen(vm: EditorViewModel) {
                     )
                     Text(
                         "With a folder: in Resolve use File > Import > Timeline and the clips link to the files in it.\n\n" +
-                            "Without one: the timeline names each file without a folder (.otio: relative to the .otio file). " +
+                            (if (exportOtio) "Without one: each file is named relative to the .otio, so keep them in the same folder. "
+                            else "Without one: each file is named without a folder. ") +
                             "If Resolve doesn't find them, drag the media into the Media Pool first, then File > Import > Timeline " +
                             "with “Automatically import source clips into media pool” unticked. Resolve matches clips by file name.",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    Text(
-                        "Files used: " + vm.usedMediaNames().joinToString(", "),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
+                    val used = vm.usedMediaNames()
+                    if (used.isNotEmpty()) Text("Files used: " + used.joinToString(", "), style = MaterialTheme.typography.bodySmall)
                 }
             },
             confirmButton = {
                 val fileName = ProjectStore.safeName(exportName.ifBlank { vm.projectName })
-                Row {
-                    TextButton(onClick = { dialog = Dialog.NONE; otioLauncher.launch("$fileName.otio") }) { Text("Save .otio") }
-                    TextButton(onClick = { dialog = Dialog.NONE; xmlLauncher.launch("$fileName.xml") }) { Text("Save .xml") }
-                }
+                TextButton(onClick = {
+                    dialog = Dialog.NONE
+                    if (exportOtio) otioLauncher.launch("$fileName.otio") else xmlLauncher.launch("$fileName.xml")
+                }) { Text(if (exportOtio) "Save .otio" else "Save .xml") }
             },
             dismissButton = { TextButton(onClick = { dialog = Dialog.NONE }) { Text("Cancel") } },
         )
