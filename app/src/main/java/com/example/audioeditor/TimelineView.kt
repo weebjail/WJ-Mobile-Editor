@@ -324,7 +324,9 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
 
             // Name (with a link mark for linked clips)
             val textX = max(x0, headerW) + 8f
-            val textW = x1 - textX - 6f
+            // Only the on-screen part of the clip: a long clip can be hundreds of thousands of pixels wide,
+            // more than text layout can handle.
+            val textW = min(x1, w) - textX - 6f
             val name = (if (c.linkId != null) "🔗 " else "") + (src?.name ?: "missing")
             if (textW > 24f) {
                 drawText(
