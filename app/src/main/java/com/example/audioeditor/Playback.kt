@@ -70,7 +70,8 @@ class Player {
                     .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
                     .build()
             )
-            .setBufferSizeInBytes(maxOf(minBuf, 4096 * 8))
+            // About 170 ms of buffer: room for the occasional wait while compressed audio is decoded.
+            .setBufferSizeInBytes(maxOf(minBuf, 8192 * 8))
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
         track = t

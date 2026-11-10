@@ -868,6 +868,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (clips.isEmpty()) { message = "Nothing to export yet"; return }
         stop()
         val mixer = mixer()
+        val used = sources.values.filter { s -> clips.any { !it.video && it.sourceId == s.id } }
+        val errorsBefore = used.associateWith { it.pcm?.readErrors ?: 0 }
         viewModelScope.launch {
             busy = "Exporting audio…"
             try {
@@ -875,7 +877,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     val out = ctx.contentResolver.openOutputStream(uri) ?: throw IOException("Couldn't open the file")
                     out.use { Exporters.writeWav(it, mixer) }
                 }
-                message = "Audio exported"
+                // Audio is read from the original files; say so if any of them couldn't be read in full.
+                val unreadable = used.filter { (it.pcm?.readErrors ?: 0) > errorsBefore.getValue(it) }
+                message = if (unreadable.isEmpty()) "Audio exported"
+                else "Exported, but parts of ${unreadable.joinToString { it.name }} couldn't be read and are silent"
             } catch (e: Exception) {
                 message = "Export failed: ${e.message}"
             } finally {
