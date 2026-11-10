@@ -933,8 +933,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun usedMediaNames(): List<String> =
         clips.map { it.sourceId }.distinct().mapNotNull { sources[it]?.name }.distinct().sorted()
 
-    /** Writes the Resolve timeline to [uri]. Only the XML is written; the media stays where it is. */
-    fun exportResolveXml(uri: Uri, name: String) {
+    /** Writes the Resolve timeline to [uri] as FCP7 XML, or OpenTimelineIO when [otio]. The media stays where it is. */
+    fun exportResolve(uri: Uri, name: String, otio: Boolean) {
         if (clips.isEmpty()) { message = "Nothing to export yet"; return }
         stop()
         val rate = frameRate
@@ -948,7 +948,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 withContext(Dispatchers.IO) {
                     val out = ctx.contentResolver.openOutputStream(uri, "wt") ?: throw IOException("Couldn't open the file")
-                    out.use { Exporters.writeResolveXml(it, timeline, rate, folder) }
+                    out.use {
+                        if (otio) Exporters.writeResolveOtio(it, timeline, rate, folder)
+                        else Exporters.writeResolveXml(it, timeline, rate, folder)
+                    }
                 }
                 message = "Timeline saved. In Resolve: File > Import > Timeline"
             } catch (e: Exception) {

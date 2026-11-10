@@ -100,6 +100,83 @@ object Exporters {
         return "%02d:%02d:%02d:%02d".format(totalSec / 3600 % 24, totalSec / 60 % 60, totalSec % 60, ff)
     }
 
+
+    /**
+     * Writes the timeline as OpenTimelineIO (.otio), which Resolve 18.5 and later imports with
+     * File > Import > Timeline. Media is referred to inside [mediaFolder] when given; otherwise by file
+     * name alone (a relative reference, so it can be found next to the .otio).
+     */
+    fun writeResolveOtio(out: OutputStream, t: Timeline, rate: FrameRate, mediaFolder: String) {
+        out.write(buildOtio(t, rate, mediaFolder).toByteArray(Charsets.UTF_8))
+        out.flush()
+    }
+
+    // ---------------------------------------------------------------- Shared timeline layout
+
+    /** A crossfade, in timeline frames. */
+    private class Xfade(val start: Long, val end: Long, val curve: FadeCurve)
+
+    /**
+     * One clip as it will be written, in timeline frames. Clips that crossfade are cut at the crossfade's centre,
+     * which is how editors store a centred transition. [xfade] is the crossfade into the next placed clip.
+     */
+    private class Placed(
+        val clip: Clip, val src: AudioSource,
+        val start: Long, val end: Long, val inF: Long,
+        val fadeIn: Long, val fadeOut: Long,   // frames; 0 = none
+        var xfade: Xfade? = null,
+    ) {
+        val len get() = end - start
+    }
+
+    /** "D:\Shoots\Day 1" or "/Users/me/Shoots" -> "D:/Shoots/Day 1/" or "Users/me/Shoots/" ("" stays ""). */
+    private fun folderPrefix(mediaFolder: String) = mediaFolder.trim().replace('\\', '/').trimStart('/')
+        .let { if (it.isEmpty() || it.endsWith("/")) it else "$it/" }
+
+    /** The recorder's own start timecode, in timeline frames (0 when the file has none). */
+    private fun startTimecodeFrames(src: AudioSource, rate: FrameRate): Long =
+        src.startSeconds?.let { Math.floor(it * rate.fps + 1e-6).toLong() } ?: 0L
+
+    private fun layoutLane(t: Timeline, laneClips: List<Clip>, isVideo: Boolean, rate: FrameRate): List<Placed> {
+        val sorted = laneClips.sortedBy { it.start }
+        val starts = LongArray(sorted.size) { sorted[it].start }
+        val ends = LongArray(sorted.size) { sorted[it].end }
+        val noFadeIn = BooleanArray(sorted.size)
+        val noFadeOut = BooleanArray(sorted.size)
+        val xfades = HashMap<Int, Xfade>()   // between sorted[i] and sorted[i + 1]
+        if (!isVideo) {
+            for (i in TimelineOps.crossfadePairs(sorted)) {
+                val a = sorted[i]; val b = sorted[i + 1]
+                val cut = (b.start + a.end) / 2
+                ends[i] = cut; noFadeOut[i] = true
+                starts[i + 1] = cut; noFadeIn[i + 1] = true
+                xfades[i] = Xfade(rate.toFrames(b.start), rate.toFrames(a.end), a.fadeOut.curve)
+            }
+        }
+        val placed = ArrayList<Placed>()
+        var prevIndex = -1
+        for ((i, c) in sorted.withIndex()) {
+            val src = t.sources[c.sourceId] ?: continue
+            val start = rate.toFrames(starts[i])
+            val end = rate.toFrames(ends[i])
+            val len = end - start
+            if (len <= 0) continue   // shorter than a frame: can't be represented
+            // The source position comes from the clip's (constant) offset between source and timeline, so pieces
+            // of one recording cut apart stay frame-continuous: each piece starts where the last one ended.
+            val srcDur = rate.toFrames(src.frames)
+            val inF = (start + rate.toFrames(c.sourceIn - c.start)).coerceAtMost(srcDur - len).coerceAtLeast(0)
+            val fadeIn = if (noFadeIn[i] || c.fadeIn.frames <= 0) 0L else maxOf(1L, rate.toFrames(c.fadeIn.frames)).coerceAtMost(len)
+            val fadeOut = if (noFadeOut[i] || c.fadeOut.frames <= 0) 0L else maxOf(1L, rate.toFrames(c.fadeOut.frames)).coerceAtMost(len)
+            // A crossfade is kept only when both of its clips made it in.
+            if (prevIndex == i - 1) placed.lastOrNull()?.xfade = xfades[i - 1]
+            placed += Placed(c, src, start, end, inF, fadeIn, fadeOut)
+            prevIndex = i
+        }
+        return placed
+    }
+
+    // ---------------------------------------------------------------- FCP7 XML
+
     private fun esc(s: String) =
         s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
 
@@ -111,37 +188,24 @@ object Exporters {
         }
     }
 
-    /** One clip as it will be written: start/end may be moved to a crossfade's centre. */
-    private class Item(val clip: Clip, var start: Long, var end: Long, var fadeIn: Boolean, var fadeOut: Boolean)
-
-    /** A centred crossfade between two overlapping clips in the same lane. */
-    private class Xfade(val start: Long, val end: Long, val curve: FadeCurve)
-
     internal fun buildXml(t: Timeline, rate: FrameRate, mediaFolder: String): String {
         val rateXml = "<rate><timebase>${rate.timebase}</timebase><ntsc>${if (rate.ntsc) "TRUE" else "FALSE"}</ntsc></rate>"
         val total = rate.toFrames(t.clips.maxOf { it.end })
-        // "D:\Shoots\Day 1" or "/Users/me/Shoots" -> "D:/Shoots/Day 1/" or "Users/me/Shoots/"
-        val prefix = mediaFolder.trim().replace('\\', '/').trimStart('/')
-            .let { if (it.isEmpty() || it.endsWith("/")) it else "$it/" }
-        val width = t.width
-        val height = t.height
-
+        val prefix = folderPrefix(mediaFolder)
         val defined = HashSet<Long>()
         var clipNum = 1
 
-        fun fileXml(sb: StringBuilder, src: AudioSource, sourceId: Long) {
-            val fileName = src.name
-            val srcDuration = rate.toFrames(src.frames)
-            if (!defined.add(sourceId)) {
-                sb.append("<file id=\"file-$sourceId\"/>\n")
+        fun fileXml(sb: StringBuilder, src: AudioSource) {
+            if (!defined.add(src.id)) {
+                sb.append("<file id=\"file-${src.id}\"/>\n")
                 return
             }
-            sb.append("<file id=\"file-$sourceId\">\n<name>${esc(fileName)}</name>\n")
-            sb.append("<pathurl>${esc("file://localhost/" + urlPath(prefix + fileName))}</pathurl>\n$rateXml\n")
-            sb.append("<duration>$srcDuration</duration>\n")
+            sb.append("<file id=\"file-${src.id}\">\n<name>${esc(src.name)}</name>\n")
+            sb.append("<pathurl>${esc("file://localhost/" + urlPath(prefix + src.name))}</pathurl>\n$rateXml\n")
+            sb.append("<duration>${rate.toFrames(src.frames)}</duration>\n")
             // The recorder's own timecode, so Resolve sees the same start time as when it reads the file.
-            src.startSeconds?.let { s ->
-                val f = Math.floor(s * rate.fps + 1e-6).toLong()
+            if (src.startSeconds != null) {
+                val f = startTimecodeFrames(src, rate)
                 sb.append("<timecode>$rateXml<string>${timecode(f, rate.timebase)}</string><frame>$f</frame>")
                 sb.append("<displayformat>NDF</displayformat><source>source</source></timecode>\n")
             }
@@ -160,49 +224,16 @@ object Exporters {
 
         fun lane(sb: StringBuilder, laneClips: List<Clip>, isVideo: Boolean, enabled: Boolean, locked: Boolean) {
             sb.append("<track>\n")
-            val items = laneClips.sortedBy { it.start }.map { Item(it, it.start, it.end, it.fadeIn.frames > 0, it.fadeOut.frames > 0) }
-            val xfades = HashMap<Int, Xfade>()   // crossfade after item i
-            if (!isVideo) {
-                for (i in TimelineOps.crossfadePairs(items.map { it.clip })) {
-                    val a = items[i]; val b = items[i + 1]
-                    val cut = (b.clip.start + a.clip.end) / 2
-                    a.end = cut; a.fadeOut = false
-                    b.start = cut; b.fadeIn = false
-                    xfades[i] = Xfade(b.clip.start, a.clip.end, a.clip.fadeOut.curve)
-                }
-            }
-            for ((i, it) in items.withIndex()) {
-                val c = it.clip
-                val src = t.sources[c.sourceId] ?: continue
-                val start = rate.toFrames(it.start)
-                val end = rate.toFrames(it.end)
-                val len = end - start
-                if (len <= 0) continue
-                // The source position comes from the clip's (constant) offset between source and timeline, so pieces
-                // of one recording cut apart stay frame-continuous: each piece starts where the last one ended.
-                val srcDur = rate.toFrames(src.frames)
-                val inF = (start + rate.toFrames(c.sourceIn - c.start)).coerceAtMost(srcDur - len).coerceAtLeast(0)
-                val fileName = src.name
-
-                if (it.fadeIn) {
-                    val f = maxOf(1L, rate.toFrames(c.fadeIn.frames)).coerceAtMost(len)
-                    appendTransition(sb, rateXml, start, start + f, "start-black", c.fadeIn.curve)
-                }
-                sb.append("<clipitem id=\"clipitem-${clipNum++}\">\n<name>${esc(fileName)}</name>\n<enabled>TRUE</enabled>\n")
-                sb.append("<duration>${rate.toFrames(src.frames)}</duration>\n$rateXml\n")
-                sb.append("<start>$start</start><end>$end</end><in>$inF</in><out>${inF + len}</out>\n")
-                fileXml(sb, src, c.sourceId)
-                if (!isVideo) {
-                    sb.append("<sourcetrack><mediatype>audio</mediatype><trackindex>1</trackindex></sourcetrack>\n")
-                }
+            for (p in layoutLane(t, laneClips, isVideo, rate)) {
+                if (p.fadeIn > 0) appendTransition(sb, rateXml, p.start, p.start + p.fadeIn, "start-black", p.clip.fadeIn.curve)
+                sb.append("<clipitem id=\"clipitem-${clipNum++}\">\n<name>${esc(p.src.name)}</name>\n<enabled>TRUE</enabled>\n")
+                sb.append("<duration>${rate.toFrames(p.src.frames)}</duration>\n$rateXml\n")
+                sb.append("<start>${p.start}</start><end>${p.end}</end><in>${p.inF}</in><out>${p.inF + p.len}</out>\n")
+                fileXml(sb, p.src)
+                if (!isVideo) sb.append("<sourcetrack><mediatype>audio</mediatype><trackindex>1</trackindex></sourcetrack>\n")
                 sb.append("</clipitem>\n")
-                if (it.fadeOut) {
-                    val f = maxOf(1L, rate.toFrames(c.fadeOut.frames)).coerceAtMost(len)
-                    appendTransition(sb, rateXml, end - f, end, "end-black", c.fadeOut.curve)
-                }
-                xfades[i]?.let { x ->
-                    appendTransition(sb, rateXml, rate.toFrames(x.start), rate.toFrames(x.end), "center", x.curve)
-                }
+                if (p.fadeOut > 0) appendTransition(sb, rateXml, p.end - p.fadeOut, p.end, "end-black", p.clip.fadeOut.curve)
+                p.xfade?.let { x -> appendTransition(sb, rateXml, x.start, x.end, "center", x.curve) }
             }
             sb.append("<enabled>${if (enabled) "TRUE" else "FALSE"}</enabled><locked>${if (locked) "TRUE" else "FALSE"}</locked>\n</track>\n")
         }
@@ -212,7 +243,7 @@ object Exporters {
         sb.append("<sequence id=\"sequence-1\">\n<name>${esc(t.name)}</name>\n<duration>$total</duration>\n$rateXml\n")
         sb.append("<timecode>$rateXml<string>00:00:00:00</string><frame>0</frame><displayformat>NDF</displayformat></timecode>\n")
         sb.append("<media>\n")
-        sb.append("<video>\n<format><samplecharacteristics>$rateXml<width>$width</width><height>$height</height>")
+        sb.append("<video>\n<format><samplecharacteristics>$rateXml<width>${t.width}</width><height>${t.height}</height>")
         sb.append("<pixelaspectratio>square</pixelaspectratio></samplecharacteristics></format>\n")
         for (v in 0 until t.videoTracks) lane(sb, t.clips.filter { it.video && it.track == v }, true, true, v in t.lockedVideo)
         sb.append("</video>\n")
@@ -233,5 +264,76 @@ object Exporters {
         sb.append("<transitionitem>\n$rateXml\n<start>$start</start><end>$end</end><alignment>$alignment</alignment>\n")
         sb.append("<effect><name>$name</name><effectid>$id</effectid><effectcategory>Dissolve</effectcategory>")
         sb.append("<effecttype>transition</effecttype><mediatype>audio</mediatype></effect>\n</transitionitem>\n")
+    }
+
+    // ---------------------------------------------------------------- OpenTimelineIO
+
+    /** A JSON string literal. */
+    private fun js(s: String): String = buildString {
+        append('"')
+        for (ch in s) when {
+            ch == '"' -> append("\\\"")
+            ch == '\\' -> append("\\\\")
+            ch == '\n' -> append("\\n")
+            ch < ' ' -> append("\\u%04x".format(ch.code))
+            else -> append(ch)
+        }
+        append('"')
+    }
+
+    /**
+     * OTIO's file format, written by hand rather than with a JSON library so numbers keep the form OTIO writes
+     * (times as floats such as 1234.0) and the schemas stay the oldest, most widely readable versions.
+     */
+    internal fun buildOtio(t: Timeline, rate: FrameRate, mediaFolder: String): String {
+        val r = rate.fps.toString()
+        fun time(v: Long) = """{"OTIO_SCHEMA": "RationalTime.1", "rate": $r, "value": $v.0}"""
+        fun range(start: Long, dur: Long) =
+            """{"OTIO_SCHEMA": "TimeRange.1", "duration": ${time(dur)}, "start_time": ${time(start)}}"""
+        val prefix = folderPrefix(mediaFolder)
+        // With a folder, a full file:// URL; without one, the bare file name (relative to the .otio).
+        fun url(name: String) = if (prefix.isEmpty()) name else "file:///" + urlPath(prefix + name)
+
+        fun transition(inOffset: Long, outOffset: Long, curve: FadeCurve) =
+            """{"OTIO_SCHEMA": "Transition.1", "name": ${js(if (curve == FadeCurve.LINEAR) "Cross Fade (0dB)" else "Cross Fade (+3dB)")}, """ +
+                """"transition_type": "SMPTE_Dissolve", "in_offset": ${time(inOffset)}, "out_offset": ${time(outOffset)}, "metadata": {}}"""
+
+        fun gap(dur: Long) =
+            """{"OTIO_SCHEMA": "Gap.1", "name": "", "source_range": ${range(0, dur)}, "effects": [], "markers": [], "metadata": {}}"""
+
+        fun clip(p: Placed): String {
+            val tc = startTimecodeFrames(p.src, rate)
+            val media = """{"OTIO_SCHEMA": "ExternalReference.1", "name": ${js(p.src.name)}, """ +
+                """"target_url": ${js(url(p.src.name))}, "available_range": ${range(tc, rate.toFrames(p.src.frames))}, "metadata": {}}"""
+            // Source times count from the file's own start timecode, as in Resolve's own OTIO files.
+            return """{"OTIO_SCHEMA": "Clip.1", "name": ${js(p.src.name)}, "source_range": ${range(tc + p.inF, p.len)}, """ +
+                """"media_reference": $media, "effects": [], "markers": [], "enabled": true, "metadata": {}}"""
+        }
+
+        fun track(name: String, kind: String, laneClips: List<Clip>, isVideo: Boolean, enabled: Boolean): String {
+            val items = ArrayList<String>()
+            var cursor = 0L
+            for (p in layoutLane(t, laneClips, isVideo, rate)) {
+                if (p.start > cursor) items += gap(p.start - cursor)
+                if (p.fadeIn > 0) items += transition(0, p.fadeIn, p.clip.fadeIn.curve)
+                items += clip(p)
+                if (p.fadeOut > 0) items += transition(p.fadeOut, 0, p.clip.fadeOut.curve)
+                // A centred crossfade: the part before the cut comes from this clip, the rest from the next.
+                p.xfade?.let { x -> items += transition(p.end - x.start, x.end - p.end, x.curve) }
+                cursor = maxOf(cursor, p.end)
+            }
+            return """{"OTIO_SCHEMA": "Track.1", "name": ${js(name)}, "kind": "$kind", "enabled": $enabled, """ +
+                """"source_range": null, "effects": [], "markers": [], "metadata": {}, "children": [""" +
+                items.joinToString(",\n") + "]}"
+        }
+
+        val tracks = ArrayList<String>()
+        for (v in 0 until t.videoTracks) tracks += track("V${v + 1}", "Video", t.clips.filter { it.video && it.track == v }, true, true)
+        for (a in 0 until t.audioTracks) {
+            tracks += track("A${a + 1}", "Audio", t.clips.filter { !it.video && it.track == a }, false, a !in t.mutedTracks)
+        }
+        return """{"OTIO_SCHEMA": "Timeline.1", "name": ${js(t.name)}, "global_start_time": ${time(0)}, "metadata": {}, """ +
+            """"tracks": {"OTIO_SCHEMA": "Stack.1", "name": "tracks", "source_range": null, "effects": [], "markers": [], """ +
+            """"metadata": {}, "children": [""" + tracks.joinToString(",\n") + "]}}\n"
     }
 }

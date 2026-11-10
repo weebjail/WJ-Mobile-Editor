@@ -62,6 +62,102 @@ class ResolveXmlTest {
         assertEquals(0, y.all("file").first().getElementsByTagName("timecode").length)
     }
 
+    // ------------------------------------------------------------ OpenTimelineIO
+
+    private fun otio(clips: List<Clip>, sources: List<AudioSource>, rate: FrameRate, folder: String, muted: Set<Int> = emptySet()) =
+        org.json.JSONObject(
+            Exporters.buildOtio(Exporters.Timeline("Test", clips, sources.associateBy { it.id }, 2, 1, muted, 1920, 1080), rate, folder),
+        )
+
+    private fun org.json.JSONObject.value(key: String) = getJSONObject(key).getDouble("value").toLong()
+
+    private fun tracks(o: org.json.JSONObject) = o.getJSONObject("tracks").getJSONArray("children").let { a ->
+        List(a.length()) { a.getJSONObject(it) }
+    }
+
+    private fun children(track: org.json.JSONObject) = track.getJSONArray("children").let { a -> List(a.length()) { a.getJSONObject(it) } }
+
+    @Test fun otioStructureMatchesTheXml() {
+        val r = Random(3)
+        for (rate in listOf(FrameRate.F23_976, FrameRate.F25, FrameRate.F29_97, FrameRate.F60)) {
+            val src = source(1, "rec 1.wav", 30 * minute, start = 3600.0 + 0.4)
+            val clips = ArrayList<Clip>()
+            var tl = 0L; var sp = 0L; var id = 1L
+            repeat(25) {
+                val len = 20_000 + r.nextLong(10L * SAMPLE_RATE)
+                tl += if (r.nextBoolean()) r.nextLong(2L * SAMPLE_RATE) else 0   // some gaps
+                clips += Clip(id++, 1, if (it % 3 == 0) 1 else 0, tl, sp, len, fadeIn = Fade(if (it % 4 == 0) 9000 else 0))
+                tl += len; sp += len + r.nextLong(SAMPLE_RATE.toLong())
+            }
+            val o = otio(clips, listOf(src), rate, "", muted = setOf(1))
+            assertEquals("Timeline.1", o.getString("OTIO_SCHEMA"))
+            val ts = tracks(o)
+            assertEquals(listOf("V1", "A1", "A2"), ts.map { it.getString("name") })
+            assertEquals(listOf("Video", "Audio", "Audio"), ts.map { it.getString("kind") })
+            assertEquals(false, ts[2].getBoolean("enabled"))   // muted track
+
+            // Same clip positions as the XML, track by track.
+            val xml = export(clips, listOf(src), rate, "")
+            val xmlTracks = xml.all("audio").first { it.parentNode.nodeName == "media" }.all("track")
+            val tc = Math.floor((3600.4) * rate.fps + 1e-6).toLong()
+            for (a in 0..1) {
+                val xmlItems = xmlTracks[a].all("clipitem").map { c ->
+                    listOf("start", "end", "in").map { c.getElementsByTagName(it).item(0).textContent.toLong() }
+                }
+                var pos = 0L
+                val placed = ArrayList<List<Long>>()
+                for (item in children(ts[a + 1])) {
+                    when (item.getString("OTIO_SCHEMA")) {
+                        "Gap.1" -> pos += item.getJSONObject("source_range").value("duration")
+                        "Clip.1" -> {
+                            val sr = item.getJSONObject("source_range")
+                            val d = sr.value("duration")
+                            placed += listOf(pos, pos + d, sr.value("start_time") - tc)
+                            pos += d
+                            val ref = item.getJSONObject("media_reference")
+                            assertEquals("rec 1.wav", ref.getString("target_url"))   // relative: next to the .otio
+                            assertEquals(tc, ref.getJSONObject("available_range").value("start_time"))
+                        }
+                        "Transition.1" -> assertEquals("SMPTE_Dissolve", item.getString("transition_type"))
+                        else -> throw AssertionError("unexpected ${item.getString("OTIO_SCHEMA")}")
+                    }
+                }
+                assertEquals("${rate.label} A${a + 1}", xmlItems, placed)
+            }
+        }
+    }
+
+    @Test fun otioFadesAndCrossfades() {
+        val src = source(1, "a.wav", 10 * minute)
+        val second = SAMPLE_RATE.toLong()
+        // Clip 1 fades in; clips 1 and 2 overlap by 1 s with a crossfade; clip 2 fades out.
+        val clips = listOf(
+            Clip(1, 1, 0, 0, 0, 10 * second, fadeIn = Fade(2 * second), fadeOut = Fade(1 * second)),
+            Clip(2, 1, 0, 9 * second, 20 * second, 10 * second, fadeIn = Fade(1 * second), fadeOut = Fade(3 * second)),
+        )
+        val kids = children(tracks(otio(clips, listOf(src), FrameRate.F25, ""))[1])
+        assertEquals(
+            listOf("Transition.1", "Clip.1", "Transition.1", "Clip.1", "Transition.1"),
+            kids.map { it.getString("OTIO_SCHEMA") },
+        )
+        assertEquals(listOf(0L, 50L), listOf(kids[0].value("in_offset"), kids[0].value("out_offset")))     // 2 s fade-in
+        assertEquals(listOf(13L, 12L), listOf(kids[2].value("in_offset"), kids[2].value("out_offset")))    // 1 s crossfade: 225..250 around the cut at 238
+        assertEquals(listOf(75L, 0L), listOf(kids[4].value("in_offset"), kids[4].value("out_offset")))    // 3 s fade-out
+        // The crossfade cut is at its centre (9.5 s = frame 237.5 -> 238).
+        assertEquals(238L, kids[1].getJSONObject("source_range").value("duration"))
+    }
+
+    @Test fun otioFolderGivesFullUrls() {
+        val src = source(1, "ZOOM0014_Tr3.WAV", minute)
+        for ((folder, expected) in listOf(
+            "D:\\Shoots\\Day 1" to "file:///D:/Shoots/Day%201/ZOOM0014_Tr3.WAV",
+            "/Users/me/Shoots" to "file:///Users/me/Shoots/ZOOM0014_Tr3.WAV",
+        )) {
+            val clip = children(tracks(otio(listOf(Clip(1, 1, 0, 0, 0, minute)), listOf(src), FrameRate.F25, folder))[1]).first()
+            assertEquals(expected, clip.getJSONObject("media_reference").getString("target_url"))
+        }
+    }
+
     @Test fun piecesOfOneRecordingStayFrameContinuous() {
         // One long recording cut at random sample positions, with gaps closed up and pieces moved, like ripple edits.
         val r = Random(1)

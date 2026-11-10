@@ -114,7 +114,11 @@ fun EditorScreen(vm: EditorViewModel) {
         it?.let(vm::exportWav)
     }
     val xmlLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/xml")) { uri ->
-        uri?.let { vm.exportResolveXml(it, exportName.ifBlank { vm.projectName }) }
+        uri?.let { vm.exportResolve(it, exportName.ifBlank { vm.projectName }, otio = false) }
+    }
+    // .otio has no standard MIME type; a generic one keeps the file name exactly as given.
+    val otioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        uri?.let { vm.exportResolve(it, exportName.ifBlank { vm.projectName }, otio = true) }
     }
 
     LaunchedEffect(vm.isPlaying) {
@@ -231,8 +235,9 @@ fun EditorScreen(vm: EditorViewModel) {
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        "Saves the timeline as an .xml file. Your media isn't copied: Resolve uses your original files. " +
-                            "Copy them and the .xml to your computer."
+                        "Saves the timeline as .xml (any Resolve version) or .otio (OpenTimelineIO, Resolve 18.5 and later). " +
+                            "Your media isn't copied: Resolve uses your original files. Copy them and the timeline file " +
+                            "to your computer."
                     )
                     OutlinedTextField(exportName, { exportName = it }, label = { Text("Timeline name") }, singleLine = true)
                     Text(
@@ -248,7 +253,8 @@ fun EditorScreen(vm: EditorViewModel) {
                     )
                     Text(
                         "With a folder: in Resolve use File > Import > Timeline and the clips link to the files in it.\n\n" +
-                            "Without one: first drag the media into Resolve's Media Pool, then File > Import > Timeline " +
+                            "Without one: the timeline names each file without a folder (.otio: relative to the .otio file). " +
+                            "If Resolve doesn't find them, drag the media into the Media Pool first, then File > Import > Timeline " +
                             "with “Automatically import source clips into media pool” unticked. Resolve matches clips by file name.",
                         style = MaterialTheme.typography.bodySmall,
                     )
@@ -259,10 +265,11 @@ fun EditorScreen(vm: EditorViewModel) {
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    dialog = Dialog.NONE
-                    xmlLauncher.launch(ProjectStore.safeName(exportName.ifBlank { vm.projectName }) + ".xml")
-                }) { Text("Save .xml") }
+                val fileName = ProjectStore.safeName(exportName.ifBlank { vm.projectName })
+                Row {
+                    TextButton(onClick = { dialog = Dialog.NONE; otioLauncher.launch("$fileName.otio") }) { Text("Save .otio") }
+                    TextButton(onClick = { dialog = Dialog.NONE; xmlLauncher.launch("$fileName.xml") }) { Text("Save .xml") }
+                }
             },
             dismissButton = { TextButton(onClick = { dialog = Dialog.NONE }) { Text("Cancel") } },
         )
