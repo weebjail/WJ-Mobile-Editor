@@ -222,12 +222,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val s = undoStack.removeLastOrNull() ?: return
         redoStack.addLast(snapshot())
         restore(s)
+        revealPlayhead()
     }
 
     fun redo() {
         val s = redoStack.removeLastOrNull() ?: return
         undoStack.addLast(snapshot())
         restore(s)
+        revealPlayhead()
     }
 
     // ------------------------------------------------------------ Import
@@ -442,6 +444,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun followPlayhead(from: Long) {
         if (playhead == from) return
         scrollFrames = (scrollFrames + (playhead - from)).coerceAtLeast(0.0)
+        revealPlayhead()
+    }
+
+    /** Scrolls the timeline to the playhead if it's off screen (placing it near the left, as during playback). */
+    private fun revealPlayhead() {
         val x = (playhead - scrollFrames) / samplesPerPx
         if (x < 0 || x > viewWidthPx) {
             scrollFrames = (playhead - viewWidthPx * 0.15 * samplesPerPx).coerceAtLeast(0.0)
@@ -914,10 +921,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun exportResolveXml(tree: Uri, name: String, pathPrefix: String) {
+    /** Where the media will be on the computer Resolve runs on (remembered between exports). Blank = match by name. */
+    var resolveMediaFolder by mutableStateOf(prefs.getString(KEY_RESOLVE_FOLDER, "") ?: ""); private set
+
+    fun updateResolveMediaFolder(folder: String) {
+        resolveMediaFolder = folder
+        prefs.edit().putString(KEY_RESOLVE_FOLDER, folder).apply()
+    }
+
+    /** Names of the media files the timeline uses, for the export dialog. */
+    fun usedMediaNames(): List<String> =
+        clips.map { it.sourceId }.distinct().mapNotNull { sources[it]?.name }.distinct().sorted()
+
+    /** Writes the Resolve timeline to [uri]. Only the XML is written; the media stays where it is. */
+    fun exportResolveXml(uri: Uri, name: String) {
         if (clips.isEmpty()) { message = "Nothing to export yet"; return }
         stop()
         val rate = frameRate
+        val folder = resolveMediaFolder
         val timeline = Exporters.Timeline(
             name, clips, sources, trackCount, videoTrackCount, mutedTracks, timelineWidth, timelineHeight,
             lockedAudio, lockedVideo,
@@ -925,8 +946,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             busy = "Saving Resolve timeline…"
             try {
-                withContext(Dispatchers.IO) { Exporters.writeResolvePackage(ctx, tree, timeline, rate, pathPrefix) }
-                message = "Saved. In Resolve: File > Import > Timeline, then pick ${ProjectStore.safeName(name)}.xml"
+                withContext(Dispatchers.IO) {
+                    val out = ctx.contentResolver.openOutputStream(uri, "wt") ?: throw IOException("Couldn't open the file")
+                    out.use { Exporters.writeResolveXml(it, timeline, rate, folder) }
+                }
+                message = "Timeline saved. In Resolve: File > Import > Timeline"
             } catch (e: Exception) {
                 message = "Export failed: ${e.message}"
             } finally {
@@ -944,6 +968,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_CURVE = "defaultCurve"
         const val KEY_XFADE = "crossfadeSeconds"
         const val KEY_RIPPLE_ALL = "rippleAllTracks"
+        const val KEY_RESOLVE_FOLDER = "resolveMediaFolder"
         const val AUTOSAVE_NAME = "Autosave"
 
         /** Older projects called the curved fade "EXPONENTIAL". */

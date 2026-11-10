@@ -79,6 +79,7 @@ object AudioDecoder {
         return AudioSource(
             id, uri, ident.name, meta.mediaFrames, meta.sampleRate, meta.channels, meta.bitDepth,
             pcm, meta.peaks, meta.video,
+            startSeconds = wav?.layout?.let { l -> l.timeReference.takeIf { it >= 0 }?.let { it.toDouble() / l.sampleRate } },
         )
     }
 

@@ -106,7 +106,6 @@ fun EditorScreen(vm: EditorViewModel) {
     var dialog by remember { mutableStateOf(Dialog.NONE) }
 
     var exportName by remember { mutableStateOf("") }
-    var exportPath by remember { mutableStateOf("") }
 
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
         if (it.isNotEmpty()) vm.importFiles(it)
@@ -114,8 +113,8 @@ fun EditorScreen(vm: EditorViewModel) {
     val wavLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("audio/wav")) {
         it?.let(vm::exportWav)
     }
-    val folderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let { vm.exportResolveXml(it, exportName.ifBlank { vm.projectName }, exportPath) }
+    val xmlLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/xml")) { uri ->
+        uri?.let { vm.exportResolveXml(it, exportName.ifBlank { vm.projectName }) }
     }
 
     LaunchedEffect(vm.isPlaying) {
@@ -232,8 +231,8 @@ fun EditorScreen(vm: EditorViewModel) {
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        "Choose an empty folder. The timeline (.xml) and copies of your media files are saved there. " +
-                            "Copy the whole folder to your computer, then in Resolve use File > Import > Timeline."
+                        "Saves the timeline as an .xml file. Your media isn't copied: Resolve uses your original files. " +
+                            "Copy them and the .xml to your computer."
                     )
                     OutlinedTextField(exportName, { exportName = it }, label = { Text("Timeline name") }, singleLine = true)
                     Text(
@@ -242,15 +241,28 @@ fun EditorScreen(vm: EditorViewModel) {
                         style = MaterialTheme.typography.bodySmall,
                     )
                     OutlinedTextField(
-                        exportPath, { exportPath = it },
-                        label = { Text("Where the folder will be on your computer (optional)") },
-                        placeholder = { Text("e.g. D:/Projects/My Mix") },
+                        vm.resolveMediaFolder, vm::updateResolveMediaFolder,
+                        label = { Text("Media folder on your computer") },
+                        placeholder = { Text("e.g. D:/Shoots/Day 1") },
                         singleLine = true,
+                    )
+                    Text(
+                        "With a folder: in Resolve use File > Import > Timeline and the clips link to the files in it.\n\n" +
+                            "Without one: first drag the media into Resolve's Media Pool, then File > Import > Timeline " +
+                            "with “Automatically import source clips into media pool” unticked. Resolve matches clips by file name.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        "Files used: " + vm.usedMediaNames().joinToString(", "),
+                        style = MaterialTheme.typography.bodySmall,
                     )
                 }
             },
             confirmButton = {
-                TextButton(onClick = { dialog = Dialog.NONE; folderLauncher.launch(null) }) { Text("Choose folder") }
+                TextButton(onClick = {
+                    dialog = Dialog.NONE
+                    xmlLauncher.launch(ProjectStore.safeName(exportName.ifBlank { vm.projectName }) + ".xml")
+                }) { Text("Save .xml") }
             },
             dismissButton = { TextButton(onClick = { dialog = Dialog.NONE }) { Text("Cancel") } },
         )

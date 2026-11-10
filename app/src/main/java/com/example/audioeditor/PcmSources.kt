@@ -106,6 +106,7 @@ class NotHandledAsWav(msg: String) : IOException(msg)
 internal class WavLayout(
     val format: Int, val bits: Int, val channels: Int, val sampleRate: Int,
     val dataOffset: Long, val dataSize: Long,   // dataSize is -1 when the header doesn't say
+    val timeReference: Long = -1,               // BWF start time in samples since midnight, -1 if none
 )
 
 /**
@@ -184,6 +185,7 @@ internal class WavPcm private constructor(
             var sampleRate = 0
             var bits = 0
             var ds64DataSize = -1L
+            var timeReference = -1L
             val chunkHeader = ByteArray(8)
             while (true) {
                 if (readFully(ins, chunkHeader, 8) < 8) throw NotHandledAsWav("no data chunk")
@@ -200,6 +202,19 @@ internal class WavPcm private constructor(
                         bits = le16(fmt, 14)
                         if (format == 0xFFFE && fmt.size >= 26) format = le16(fmt, 24) // extensible
                         skipFully(ins, padded - size)
+                        pos += padded
+                    }
+                    "bext" -> {
+                        // Broadcast WAV: TimeReference (where the recording starts, in samples since midnight)
+                        // sits at byte 338. Recorders put it before the audio, so it can be read here.
+                        if (size >= 346) {
+                            val head = ByteArray(346)
+                            if (readFully(ins, head, head.size) < head.size) throw NotHandledAsWav("bad bext chunk")
+                            timeReference = le32(head, 338) or (le32(head, 342) shl 32)
+                            skipFully(ins, padded - head.size)
+                        } else {
+                            skipFully(ins, padded)
+                        }
                         pos += padded
                     }
                     "ds64" -> {
@@ -219,7 +234,7 @@ internal class WavPcm private constructor(
                             size == 0xFFFFFFFFL || size == 0L -> -1L   // unknown: runs to the end of the file
                             else -> size
                         }
-                        return WavLayout(format, bits, channels, sampleRate, pos, dataSize)
+                        return WavLayout(format, bits, channels, sampleRate, pos, dataSize, timeReference)
                     }
                     else -> {
                         if (skipFully(ins, padded) < padded) throw NotHandledAsWav("no data chunk")

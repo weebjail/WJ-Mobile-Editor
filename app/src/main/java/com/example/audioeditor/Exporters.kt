@@ -1,8 +1,5 @@
 package com.example.audioeditor
 
-import android.content.Context
-import android.net.Uri
-import android.provider.DocumentsContract
 import java.io.BufferedOutputStream
 import java.io.IOException
 import java.io.OutputStream
@@ -86,33 +83,21 @@ object Exporters {
     )
 
     /**
-     * Saves into the chosen folder: a copy of every media file used, plus an FCP7-style XML timeline
-     * that DaVinci Resolve can import (File > Import > Timeline).
+     * Writes an FCP7-style XML timeline that DaVinci Resolve can import (File > Import > Timeline).
+     * Media files aren't copied: the XML refers to them by name, inside [mediaFolder] (the folder they'll
+     * be in on the computer, e.g. "D:/Shoots/Day 1"). With no folder, Resolve matches clips by file name
+     * against media already in its Media Pool.
      */
-    fun writeResolvePackage(context: Context, tree: Uri, t: Timeline, rate: FrameRate, pathPrefix: String) {
-        val cr = context.contentResolver
-        val dir = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+    fun writeResolveXml(out: OutputStream, t: Timeline, rate: FrameRate, mediaFolder: String) {
+        out.write(buildXml(t, rate, mediaFolder).toByteArray(Charsets.UTF_8))
+        out.flush()
+    }
 
-        val fileNames = HashMap<Long, String>()
-        for (id in t.clips.map { it.sourceId }.toSet()) {
-            val src = t.sources[id] ?: continue
-            val mime = cr.getType(src.uri) ?: "application/octet-stream"
-            val doc = DocumentsContract.createDocument(cr, dir, mime, src.name)
-                ?: throw IOException("Couldn't create ${src.name}")
-            val input = cr.openInputStream(src.uri) ?: throw IOException("Couldn't read ${src.name}")
-            input.use { ins ->
-                val out = cr.openOutputStream(doc) ?: throw IOException("Couldn't write ${src.name}")
-                out.use { ins.copyTo(it, 1 shl 16) }
-            }
-            // The folder may rename the copy (e.g. "take (1).wav"), so use the real name.
-            fileNames[id] = AudioDecoder.displayName(context, doc)
-        }
-
-        val xml = buildXml(t, fileNames, rate, pathPrefix)
-        val xmlDoc = DocumentsContract.createDocument(cr, dir, "text/xml", "${ProjectStore.safeName(t.name)}.xml")
-            ?: throw IOException("Couldn't create the XML file")
-        val out = cr.openOutputStream(xmlDoc) ?: throw IOException("Couldn't write the XML file")
-        out.use { it.write(xml.toByteArray(Charsets.UTF_8)) }
+    /** "HH:MM:SS:FF" for [frames] counted at [timebase] (non-drop-frame). */
+    internal fun timecode(frames: Long, timebase: Int): String {
+        val ff = frames % timebase
+        val totalSec = frames / timebase
+        return "%02d:%02d:%02d:%02d".format(totalSec / 3600 % 24, totalSec / 60 % 60, totalSec % 60, ff)
     }
 
     private fun esc(s: String) =
@@ -132,10 +117,11 @@ object Exporters {
     /** A centred crossfade between two overlapping clips in the same lane. */
     private class Xfade(val start: Long, val end: Long, val curve: FadeCurve)
 
-    private fun buildXml(t: Timeline, fileNames: Map<Long, String>, rate: FrameRate, pathPrefix: String): String {
+    internal fun buildXml(t: Timeline, rate: FrameRate, mediaFolder: String): String {
         val rateXml = "<rate><timebase>${rate.timebase}</timebase><ntsc>${if (rate.ntsc) "TRUE" else "FALSE"}</ntsc></rate>"
         val total = rate.toFrames(t.clips.maxOf { it.end })
-        val prefix = pathPrefix.trim().replace('\\', '/').trimStart('/')
+        // "D:\Shoots\Day 1" or "/Users/me/Shoots" -> "D:/Shoots/Day 1/" or "Users/me/Shoots/"
+        val prefix = mediaFolder.trim().replace('\\', '/').trimStart('/')
             .let { if (it.isEmpty() || it.endsWith("/")) it else "$it/" }
         val width = t.width
         val height = t.height
@@ -144,7 +130,7 @@ object Exporters {
         var clipNum = 1
 
         fun fileXml(sb: StringBuilder, src: AudioSource, sourceId: Long) {
-            val fileName = fileNames[sourceId] ?: src.name
+            val fileName = src.name
             val srcDuration = rate.toFrames(src.frames)
             if (!defined.add(sourceId)) {
                 sb.append("<file id=\"file-$sourceId\"/>\n")
@@ -152,7 +138,14 @@ object Exporters {
             }
             sb.append("<file id=\"file-$sourceId\">\n<name>${esc(fileName)}</name>\n")
             sb.append("<pathurl>${esc("file://localhost/" + urlPath(prefix + fileName))}</pathurl>\n$rateXml\n")
-            sb.append("<duration>$srcDuration</duration>\n<media>")
+            sb.append("<duration>$srcDuration</duration>\n")
+            // The recorder's own timecode, so Resolve sees the same start time as when it reads the file.
+            src.startSeconds?.let { s ->
+                val f = Math.floor(s * rate.fps + 1e-6).toLong()
+                sb.append("<timecode>$rateXml<string>${timecode(f, rate.timebase)}</string><frame>$f</frame>")
+                sb.append("<displayformat>NDF</displayformat><source>source</source></timecode>\n")
+            }
+            sb.append("<media>")
             src.video?.let {
                 sb.append("<video><samplecharacteristics>$rateXml<width>${it.width}</width><height>${it.height}</height>")
                 sb.append("</samplecharacteristics></video>")
@@ -185,8 +178,11 @@ object Exporters {
                 val end = rate.toFrames(it.end)
                 val len = end - start
                 if (len <= 0) continue
-                val inF = rate.toFrames(c.sourceIn + (it.start - c.start))
-                val fileName = fileNames[c.sourceId] ?: src.name
+                // The source position comes from the clip's (constant) offset between source and timeline, so pieces
+                // of one recording cut apart stay frame-continuous: each piece starts where the last one ended.
+                val srcDur = rate.toFrames(src.frames)
+                val inF = (start + rate.toFrames(c.sourceIn - c.start)).coerceAtMost(srcDur - len).coerceAtLeast(0)
+                val fileName = src.name
 
                 if (it.fadeIn) {
                     val f = maxOf(1L, rate.toFrames(c.fadeIn.frames)).coerceAtMost(len)

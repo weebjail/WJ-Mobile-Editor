@@ -50,7 +50,7 @@ class WavPcmTest {
     private fun wav(
         frames: Int, channels: Int = 2, rate: Int = 48000, format: Int = 1, bits: Int = 16,
         extensible: Boolean = false, junkBeforeData: Boolean = false, rf64: Boolean = false,
-        dataSizeField: Long? = null, trailing: ByteArray? = null, seed: Int = 1,
+        dataSizeField: Long? = null, trailing: ByteArray? = null, seed: Int = 1, timeReference: Long? = null,
     ): Wav {
         val r = Random(seed)
         val samples = DoubleArray(frames * channels) { (r.nextDouble() * 2 - 1) * 0.9 }
@@ -58,6 +58,8 @@ class WavPcmTest {
         val o = ByteArrayOutputStream()
         id(o, if (rf64) "RF64" else "RIFF"); le32(o, if (rf64) 0xFFFFFFFFL else 0L); id(o, "WAVE")
         if (rf64) { id(o, "ds64"); le32(o, 28); le64(o, 0); le64(o, data.size.toLong()); le64(o, frames.toLong()); le32(o, 0) }
+        // Broadcast WAV chunk laid out like a Zoom recorder's: 858 bytes, TimeReference at byte 338.
+        if (timeReference != null) { id(o, "bext"); le32(o, 858); val b = ByteArray(858); for (i in 0 until 8) b[338 + i] = (timeReference shr (8 * i)).toByte(); o.write(b) }
         if (junkBeforeData) { id(o, "LIST"); le32(o, 5); o.write(byteArrayOf(1, 2, 3, 4, 5)); o.write(0) } // odd size + pad byte
         id(o, "fmt ")
         if (extensible) {
@@ -109,6 +111,21 @@ class WavPcmTest {
     @Test fun extensibleHeaderAndExtraChunks() {
         val w = wav(2000, format = 1, bits = 24, extensible = true, junkBeforeData = true)
         assertMatches(w, open(w), 2, EXACT)
+    }
+
+    @Test fun readsBroadcastWavTimecode() {
+        val tr = 13L * 3600 * 96000 + 12345   // 13:00 at 96 kHz: needs more than 32 bits
+        val w = wav(1500, bits = 24, timeReference = tr)
+        val p = open(w)
+        assertEquals(tr, p.layout.timeReference)
+        assertMatches(w, p, 2, EXACT)                         // the extra chunk doesn't disturb the audio
+        assertEquals(-1L, open(wav(10)).layout.timeReference)  // plain WAV: none
+    }
+
+    @Test fun timecodeLabels() {
+        assertEquals("00:00:00:00", Exporters.timecode(0, 30))
+        assertEquals("01:02:03:04", Exporters.timecode(((3600 + 120 + 3) * 25 + 4).toLong(), 25))
+        assertEquals("13:31:30:29", Exporters.timecode((13L * 3600 + 31 * 60 + 30) * 30 + 29, 30))
     }
 
     @Test fun rf64UsesDs64SizeAndIgnoresTrailingChunks() {
