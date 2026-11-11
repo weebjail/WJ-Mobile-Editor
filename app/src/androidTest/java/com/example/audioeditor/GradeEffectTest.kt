@@ -16,7 +16,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.Renderer
-import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -104,7 +103,7 @@ class GradeEffectTest {
         val main = InstrumentationRegistry.getInstrumentation()
         main.runOnMainSync {
             // Software decoders: the emulator's hardware H.264 decoder can't be used from tests.
-            val renderers = DefaultRenderersFactory(ctx).setMediaCodecSelector { mime, secure, tunneling ->
+            val renderers = RedrawableRenderersFactory(ctx).setMediaCodecSelector { mime, secure, tunneling ->
                 MediaCodecUtil.getDecoderInfos(mime, secure, tunneling).sortedBy { it.hardwareAccelerated }
             }
             player = ExoPlayer.Builder(ctx, renderers).build()
@@ -127,6 +126,56 @@ class GradeEffectTest {
         assertEquals("a frame was shown", true, ok)
         return pixel
     }
+
+    /** Shows the first frame paused, then changes the grade and asks for a redraw, as the sliders do. */
+    @Test
+    fun pausedFrameIsRedrawnWithANewGrade() {
+        val video = makeVideo(Color.rgb(200, 100, 50))
+        val thread = HandlerThread("reader").apply { start() }
+        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+        val frames = java.util.concurrent.LinkedBlockingQueue<Int>()
+        reader.setOnImageAvailableListener({ r ->
+            val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+            val p = img.planes[0]
+            val i = (h / 2) * p.rowStride + (w / 2) * p.pixelStride
+            val b = p.buffer
+            frames += Color.rgb(b.get(i).toInt() and 0xFF, b.get(i + 1).toInt() and 0xFF, b.get(i + 2).toInt() and 0xFF)
+            img.close()
+        }, Handler(thread.looper))
+        val live = LiveGrade()
+        lateinit var player: ExoPlayer
+        val main = InstrumentationRegistry.getInstrumentation()
+        main.runOnMainSync {
+            val renderers = RedrawableRenderersFactory(ctx).setMediaCodecSelector { mime, secure, tunneling ->
+                MediaCodecUtil.getDecoderInfos(mime, secure, tunneling).sortedBy { it.hardwareAccelerated }
+            }
+            player = ExoPlayer.Builder(ctx, renderers).build()
+            player.setVideoEffects(listOf(GradeEffect(live)))
+            player.setVideoSurface(reader.surface)
+            for (i in 0 until player.rendererCount) {
+                if (player.getRendererType(i) != C.TRACK_TYPE_VIDEO) continue
+                player.createMessage(player.getRenderer(i))
+                    .setType(Renderer.MSG_SET_VIDEO_OUTPUT_RESOLUTION).setPayload(Size(w, h)).send()
+            }
+            player.setMediaItem(MediaItem.fromUri(Uri.fromFile(video)))
+            player.playWhenReady = false   // paused: only the first frame is shown
+            player.prepare()
+        }
+        val plain = frames.poll(15, TimeUnit.SECONDS)
+        assertNotNull("the paused frame was shown", plain)
+        Thread.sleep(500)
+        frames.clear()
+        live.state = GradeState(CubeLut(2, INVERT), 0f, 0f, 0f)
+        main.runOnMainSync { player.setVideoEffects(androidx.media3.common.VideoFrameProcessor.REDRAW) }
+        val redrawn = frames.poll(5, TimeUnit.SECONDS)
+        main.runOnMainSync { player.release() }
+        reader.close()
+        thread.quitSafely()
+        assertNotNull("a new frame came after the redraw", redrawn)
+        assertColor(Color.rgb(255 - Color.red(plain!!), 255 - Color.green(plain), 255 - Color.blue(plain)), redrawn!!)
+    }
+
+    private val INVERT = floatArrayOf(1f, 1f, 1f, 0f, 1f, 1f, 1f, 0f, 1f, 0f, 0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f, 1f, 0f, 0f, 0f, 0f, 0f)
 
     private fun assertColor(expected: Int, actual: Int, tolerance: Int = 14) {
         val msg = "expected ${Integer.toHexString(expected)} got ${Integer.toHexString(actual)}"

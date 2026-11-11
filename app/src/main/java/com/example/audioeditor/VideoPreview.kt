@@ -16,9 +16,65 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.VideoFrameProcessor
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.video.MediaCodecVideoRenderer
+import androidx.media3.exoplayer.video.PlaybackVideoGraphWrapper
+import androidx.media3.exoplayer.video.VideoFrameReleaseControl
+import androidx.media3.exoplayer.video.VideoRendererEventListener
 import kotlin.math.abs
+
+/**
+ * The normal renderers, except that the video keeps a copy of the frame on screen, so a paused frame can be drawn
+ * again with a new colour grade (ExoPlayer leaves this off by default, and then redraw requests do nothing).
+ */
+@UnstableApi
+class RedrawableRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
+    private class RedrawableVideoRenderer(b: MediaCodecVideoRenderer.Builder) : MediaCodecVideoRenderer(b) {
+        override fun createPlaybackVideoGraphWrapper(context: Context, control: VideoFrameReleaseControl): PlaybackVideoGraphWrapper =
+            PlaybackVideoGraphWrapper.Builder(context, control)
+                .setEnablePlaylistMode(true)
+                .setClock(clock)
+                .setEnableReplayableCache(true)
+                .build()
+    }
+
+    override fun buildVideoRenderers(
+        context: Context,
+        extensionRendererMode: Int,
+        mediaCodecSelector: MediaCodecSelector,
+        enableDecoderFallback: Boolean,
+        eventHandler: Handler,
+        eventListener: VideoRendererEventListener,
+        allowedVideoJoiningTimeMs: Long,
+        out: ArrayList<Renderer>,
+    ) {
+        val defaults = ArrayList<Renderer>()
+        super.buildVideoRenderers(
+            context, extensionRendererMode, mediaCodecSelector, enableDecoderFallback, eventHandler, eventListener,
+            allowedVideoJoiningTimeMs, defaults,
+        )
+        // Swap the standard video renderer for one set up the same way, but with the frame copy kept.
+        for (r in defaults) {
+            out += if (r is MediaCodecVideoRenderer) {
+                RedrawableVideoRenderer(
+                    MediaCodecVideoRenderer.Builder(context)
+                        .setCodecAdapterFactory(codecAdapterFactory)
+                        .setMediaCodecSelector(mediaCodecSelector)
+                        .setAllowedJoiningTimeMs(allowedVideoJoiningTimeMs)
+                        .setEnableDecoderFallback(enableDecoderFallback)
+                        .setEventHandler(eventHandler)
+                        .setEventListener(eventListener)
+                        .setMaxDroppedFramesToNotify(MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY)
+                )
+            } else r
+        }
+    }
+}
 
 /**
  * Shows the video under the playhead. Decoding is done by ExoPlayer with the phone's hardware
@@ -34,7 +90,7 @@ class VideoPreview(context: Context) {
     /** The colour grade of the clip being shown, read on the GPU for every frame. */
     private val liveGrade = LiveGrade()
 
-    val player: ExoPlayer = ExoPlayer.Builder(context).build().apply {
+    val player: ExoPlayer = ExoPlayer.Builder(context, RedrawableRenderersFactory(context)).build().apply {
         volume = 0f
         // The preview's sound comes from our own mixer; don't decode the video's audio at all. This also
         // makes the player run on its own clock instead of a silent audio track's.
@@ -87,8 +143,9 @@ class VideoPreview(context: Context) {
     private val refreshRunnable = Runnable { refreshNow() }
 
     /**
-     * While paused, a new grade only shows once the frame is drawn again, which re-seeking to the same spot does.
-     * Dragging a slider asks for this many times a second, so seeks are limited to a few a second, ending on the latest.
+     * While paused, a new grade only shows once the frame is drawn again. The player redraws its last frame through
+     * the colour pass (no decoding, so it's quick). A slider drag asks for this many times a second; redraws are
+     * limited to about one per screen refresh or two, always ending on the latest setting.
      */
     private fun requestRefresh() {
         handler.removeCallbacks(refreshRunnable)
@@ -99,7 +156,7 @@ class VideoPreview(context: Context) {
     private fun refreshNow() {
         if (player.playWhenReady || !hasFrame) return
         lastRefreshAt = SystemClock.uptimeMillis()
-        player.seekTo(player.currentPosition)
+        player.setVideoEffects(VideoFrameProcessor.REDRAW)
     }
 
     /** Shows [grade] ([lut] is the loaded LUT it names, if any). Returns true if it changed. */
@@ -175,7 +232,7 @@ class VideoPreview(context: Context) {
         const val MAX_DRIFT_MS = 1000L
         const val SEEK_SETTLE_MS = 1500L
         const val MAX_LEAD_MS = 800L
-        const val REFRESH_MS = 120L
+        const val REFRESH_MS = 30L
     }
 }
 
