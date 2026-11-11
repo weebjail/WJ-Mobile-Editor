@@ -181,6 +181,10 @@ fun EditorScreen(vm: EditorViewModel) {
                     if (vm.snapEnabled) "Snapping on" else "Snapping off",
                 ) { vm.snapEnabled = !vm.snapEnabled }
                 IconBtn(Icons.Default.Sync, "Sync video to recorder audio", onClick = vm::syncToRecorder)
+                ToggleBtn(Icons.Default.Palette, if (showGrade) "Colour controls: on" else "Colour controls: off", showGrade) {
+                    showGrade = !showGrade
+                    if (showGrade && vm.gradeTarget == null) vm.message = "Tap a video clip to change its colour"
+                }
                 MenuBtn(Icons.Default.IosShare, "Export") { close ->
                     DropdownMenuItem(text = { Text("Export audio (WAV)") }, onClick = {
                         close(); wavLauncher.launch("${ProjectStore.safeName(vm.projectName)}.wav")
@@ -240,10 +244,6 @@ fun EditorScreen(vm: EditorViewModel) {
                 IconBtn(Icons.Default.LastPage, "Ripple trim end to playhead", onClick = vm::rippleTrimEnd)
                 IconBtn(Icons.Default.ContentCut, "Cut at playhead", onClick = vm::cut)
                 IconBtn(Icons.Default.JoinFull, "Crossfade", onClick = vm::crossfade)
-                ToggleBtn(Icons.Default.Palette, if (showGrade) "Colour controls: on" else "Colour controls: off", showGrade) {
-                    showGrade = !showGrade
-                    if (showGrade && vm.gradeTarget == null) vm.message = "Tap a video clip to change its colour"
-                }
             }
         }
 
