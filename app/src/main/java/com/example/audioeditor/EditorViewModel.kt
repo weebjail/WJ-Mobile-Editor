@@ -22,6 +22,9 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
 
+/** Where imported media or a timeline goes when the timeline already has clips. */
+enum class Placement { PLAYHEAD, END, NEW_TRACK }
+
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private val ctx: Application get() = getApplication()
@@ -250,20 +253,72 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun takePermissions(uris: List<Uri>) {
+        for (uri in uris) {
+            try {
+                ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (_: SecurityException) {
+            }
+        }
+    }
+
+    /** Media files or a timeline waiting for the user to choose where they go (asked when the timeline isn't empty). */
+    sealed interface PendingImport {
+        class Media(val uris: List<Uri>) : PendingImport
+        class Timeline(val otio: OtioImport.OTimeline, val files: Map<String, Uri>) : PendingImport
+    }
+
+    var pendingImport by mutableStateOf<PendingImport?>(null); private set
+
+    /** Imports media files. On a timeline that already has clips, first asks where they should go. */
     fun importFiles(uris: List<Uri>) {
+        takePermissions(uris)
+        if (clips.isEmpty()) importMedia(uris, Placement.END) else pendingImport = PendingImport.Media(uris)
+    }
+
+    /** The answer to [pendingImport]; null cancels. */
+    fun choosePlacement(p: Placement?) {
+        val req = pendingImport ?: return
+        pendingImport = null
+        if (p == null) return
+        when (req) {
+            is PendingImport.Media -> importMedia(req.uris, p)
+            is PendingImport.Timeline -> placeTimeline(req.otio, req.files, p)
+        }
+    }
+
+    /**
+     * Adds [new] clips in overwrite mode, like dropping them onto the timeline in Resolve: whatever they land on in
+     * their lanes is trimmed, split or removed. New clips don't trim each other (crossfading clips overlap).
+     */
+    private fun overwrite(existing: List<Clip>, new: List<Clip>): List<Clip> {
+        var kept = existing
+        for (m in new) kept = TimelineOps.place(kept, m, ::newId).filter { it.id != m.id }
+        return kept + new
+    }
+
+    /**
+     * Puts imported files on the timeline, starting at the playhead or the end of the timeline, or on new tracks
+     * at the playhead. Videos follow one another on a video track with their sound on a camera-audio track;
+     * audio files follow one another on their own track, starting at the same point (ready to sync).
+     */
+    private fun importMedia(uris: List<Uri>, placement: Placement) {
         viewModelScope.launch {
             stop()
-            for (uri in uris) {
-                try {
-                    ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                } catch (_: SecurityException) {
+            val results = decodeAll(uris.map { it to newId() }, "Importing")
+            val failures = mutableListOf<String>()
+            val decoded = results.mapIndexedNotNull { i, r ->
+                r.getOrElse {
+                    failures += "${AudioDecoder.displayName(ctx, uris[i])}: ${it.message ?: "unknown error"}"
+                    null
                 }
             }
-            val results = decodeAll(uris.map { it to newId() }, "Importing")
-            var working = clips
+            val working = clips
+            val added = ArrayList<Clip>()
             var tracks = trackCount
-            val failures = mutableListOf<String>()
-            val explicitTrack = overrideSelectedId?.let { id -> clips.find { it.id == id } }
+            var vTracks = videoTrackCount
+            val explicitTrack = if (placement == Placement.NEW_TRACK) null else overrideSelectedId
+                ?.let { id -> clips.find { it.id == id } }
                 ?.takeIf { !it.video && it.linkId == null && isEditable(it) }?.track
 
             /**
@@ -273,42 +328,59 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             fun pickTrack(camera: Boolean): Int {
                 for (t in 0 until tracks) {
                     if (isLocked(false, t)) continue
-                    if (working.filter { !it.video && it.track == t }.all { (it.linkId != null) == camera }) return t
+                    if ((working + added).filter { !it.video && it.track == t }.all { (it.linkId != null) == camera }) return t
                 }
                 if (tracks < MAX_AUDIO_TRACKS) return tracks++
                 return (0 until tracks).firstOrNull { !isLocked(false, it) } ?: 0
             }
-            var vTracks = videoTrackCount
-            val videoTrack = (0 until vTracks).firstOrNull { !isLocked(true, it) }
-                ?: if (vTracks < MAX_VIDEO_TRACKS) vTracks else 0
-            fun laneEnd(video: Boolean, track: Int) =
-                working.filter { it.video == video && it.track == track }.maxOfOrNull { it.end } ?: 0L
 
+            var videoTrack: Int
+            var camTrack: Int? = null      // fixed tracks when going onto new tracks
+            var recTrack: Int? = null
+            if (placement == Placement.NEW_TRACK) {
+                val needV = decoded.any { it.video != null }
+                val needCam = decoded.any { it.video != null && it.hasAudio }
+                val needRec = decoded.any { it.video == null }
+                val newA = (if (needCam) 1 else 0) + (if (needRec) 1 else 0)
+                if ((needV && vTracks >= MAX_VIDEO_TRACKS) || tracks + newA > MAX_AUDIO_TRACKS) {
+                    busy = null
+                    message = "There's no room for new tracks (at most $MAX_VIDEO_TRACKS video and $MAX_AUDIO_TRACKS " +
+                        "audio tracks). Import again and put the files at the playhead or the end instead."
+                    return@launch
+                }
+                videoTrack = if (needV) vTracks++ else 0
+                if (needCam) camTrack = tracks++
+                if (needRec) recTrack = tracks++
+            } else {
+                videoTrack = (0 until vTracks).firstOrNull { !isLocked(true, it) }
+                    ?: if (vTracks < MAX_VIDEO_TRACKS) vTracks else 0
+            }
+
+            val base = if (placement == Placement.END) totalFrames else playhead
+            var videoAt = base
+            var audioAt = base
             val newSources = mutableMapOf<Long, AudioSource>()
-            for ((i, r) in results.withIndex()) {
-                val src = r.getOrElse {
-                    failures += "${AudioDecoder.displayName(ctx, uris[i])}: ${it.message ?: "unknown error"}"
-                    null
-                } ?: continue
+            for (src in decoded) {
                 newSources[src.id] = src
                 if (src.video != null) {
-                    val camTrack = if (src.hasAudio) pickTrack(camera = true) else -1
+                    val cam = if (src.hasAudio) camTrack ?: pickTrack(camera = true) else -1
                     if (videoTrack >= vTracks) vTracks = videoTrack + 1   // all video tracks locked: add one
-                    val start = maxOf(laneEnd(true, videoTrack), if (camTrack >= 0) laneEnd(false, camTrack) else 0L)
-                    val link = if (camTrack >= 0) newId() else null
-                    working = working + Clip(newId(), src.id, videoTrack, start, 0L, src.frames, video = true, linkId = link)
-                    if (camTrack >= 0) {
-                        working = working + Clip(
-                            newId(), src.id, camTrack, start, 0L, src.pcm!!.frames.coerceAtMost(src.frames),
+                    val link = if (cam >= 0) newId() else null
+                    added += Clip(newId(), src.id, videoTrack, videoAt, 0L, src.frames, video = true, linkId = link)
+                    if (cam >= 0) {
+                        added += Clip(
+                            newId(), src.id, cam, videoAt, 0L, src.pcm!!.frames.coerceAtMost(src.frames),
                             Fade(curve = defaultCurve), Fade(curve = defaultCurve), linkId = link,
                         )
                     }
+                    videoAt += src.frames
                 } else {
-                    val track = explicitTrack ?: pickTrack(camera = false)
-                    working = working + Clip(
-                        newId(), src.id, track, laneEnd(false, track), 0L, src.frames,
+                    val track = recTrack ?: explicitTrack ?: pickTrack(camera = false)
+                    added += Clip(
+                        newId(), src.id, track, audioAt, 0L, src.frames,
                         Fade(curve = defaultCurve), Fade(curve = defaultCurve),
                     )
+                    audioAt += src.frames
                 }
             }
             if (newSources.isNotEmpty()) {
@@ -316,7 +388,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 pushUndo()
                 trackCount = tracks
                 videoTrackCount = vTracks
-                applyClips(working)
+                applyClips(overwrite(working, added))
                 loadThumbnails(newSources.values)
             }
             busy = null
@@ -330,6 +402,214 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 },
             ).joinToString("\n").ifEmpty { null }
         }
+    }
+
+    // ------------------------------------------------------------ Importing a timeline (.otio from Resolve)
+
+    /** A timeline waiting for the user to pick media files it uses that aren't in the project yet. */
+    class OtioMedia(val otio: OtioImport.OTimeline, val missing: List<String>, val found: Map<String, Uri>)
+
+    var otioMedia by mutableStateOf<OtioMedia?>(null); private set
+
+    /** Reads an .otio file. Media already in the project is reused; the user is asked for the rest. */
+    fun importTimeline(uri: Uri) {
+        stop()
+        viewModelScope.launch {
+            busy = "Reading timeline…"
+            try {
+                val otio = withContext(Dispatchers.IO) {
+                    val text = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
+                        ?: throw IOException("Couldn't open the file")
+                    OtioImport.parse(text)
+                }
+                if (otio.clipCount == 0) {
+                    message = "“${otio.name}” has no clips that can be imported"
+                    return@launch
+                }
+                val known = sources.values.map { it.name.lowercase() }.toSet()
+                val missing = otio.mediaNames.filter { it.lowercase() !in known }
+                if (missing.isEmpty()) timelineReady(otio, emptyMap()) else otioMedia = OtioMedia(otio, missing, emptyMap())
+            } catch (e: Exception) {
+                message = "Couldn't read the timeline: ${e.message}"
+            } finally {
+                busy = null
+            }
+        }
+    }
+
+    /** Media files picked for [otioMedia], matched to the timeline's clips by file name. */
+    fun otioMediaPicked(uris: List<Uri>) {
+        val req = otioMedia ?: return
+        takePermissions(uris)
+        viewModelScope.launch {
+            val named = withContext(Dispatchers.IO) { uris.associateBy { AudioDecoder.displayName(ctx, it).lowercase() } }
+            val matched = req.missing.mapNotNull { n -> named[n.lowercase()]?.let { n to it } }.toMap()
+            val found = req.found + matched
+            val still = req.missing.filter { it !in matched }
+            if (still.isEmpty()) {
+                otioMedia = null
+                timelineReady(req.otio, found)
+            } else {
+                otioMedia = OtioMedia(req.otio, still, found)
+                val unused = uris.size - matched.size
+                if (unused > 0) message = "$unused of the chosen files ${if (unused == 1) "isn't" else "aren't"} used by this timeline"
+            }
+        }
+    }
+
+    /** Goes ahead without the media still missing; clips that use it are left out. */
+    fun otioSkipMissing() {
+        val req = otioMedia ?: return
+        otioMedia = null
+        timelineReady(req.otio, req.found)
+    }
+
+    fun cancelOtio() { otioMedia = null }
+
+    private fun timelineReady(otio: OtioImport.OTimeline, files: Map<String, Uri>) {
+        if (clips.isEmpty()) placeTimeline(otio, files, Placement.END) else pendingImport = PendingImport.Timeline(otio, files)
+    }
+
+    /**
+     * Puts an imported timeline's clips on this one: track for track from V1 / A1 (at the playhead or the end),
+     * or on new tracks above the existing ones (at the playhead). An empty project takes the timeline's frame rate.
+     */
+    private fun placeTimeline(otio: OtioImport.OTimeline, files: Map<String, Uri>, placement: Placement) {
+        viewModelScope.launch {
+            stop()
+            val wasEmpty = clips.isEmpty()
+            val entries = files.entries.toList()
+            val results = decodeAll(entries.map { it.value to newId() }, "Importing media")
+            val failures = mutableListOf<String>()
+            val newSources = LinkedHashMap<Long, AudioSource>()
+            for ((i, r) in results.withIndex()) {
+                r.onSuccess { newSources[it.id] = it }
+                    .onFailure { failures += "${entries[i].key}: ${it.message ?: "unknown error"}" }
+            }
+            // Media already in the project first, then the newly picked files (matched by their timeline name).
+            val media = HashMap<String, OtioImport.Media>()
+            fun add(name: String, s: AudioSource) {
+                media.putIfAbsent(
+                    name.lowercase(),
+                    OtioImport.Media(s.id, s.video != null, s.frames, s.pcm?.frames?.coerceAtMost(s.frames) ?: 0L),
+                )
+            }
+            for (s in sources.values) add(s.name, s)
+            for ((i, r) in results.withIndex()) r.getOrNull()?.let { add(entries[i].key, it) }
+
+            val newTracks = placement == Placement.NEW_TRACK
+            val vBase = if (newTracks) videoTrackCount else 0
+            val aBase = if (newTracks) trackCount else 0
+            val offset = if (placement == Placement.END) totalFrames else playhead
+            val r = OtioImport.toClips(otio, media, offset, vBase, aBase, defaultCurve, ::newId)
+            busy = null
+            val needV = maxOf(videoTrackCount, vBase + r.videoTracksUsed)
+            val needA = maxOf(trackCount, aBase + r.audioTracksUsed)
+            val failed = failures.takeIf { it.isNotEmpty() }?.let { "\nCouldn't open: " + it.joinToString("; ") } ?: ""
+            when {
+                r.clips.isEmpty() -> {
+                    message = "None of the clips in “${otio.name}” could be imported. Check the media files.$failed"
+                    return@launch
+                }
+                needV > MAX_VIDEO_TRACKS || needA > MAX_AUDIO_TRACKS -> {
+                    message = "That needs $needV video and $needA audio tracks, but the most is $MAX_VIDEO_TRACKS video " +
+                        "and $MAX_AUDIO_TRACKS audio." + if (newTracks) " Try putting it at the playhead or the end instead." else ""
+                    return@launch
+                }
+                !newTracks && r.clips.any { isLocked(it.video, it.track) } -> {
+                    message = "Some of the tracks the timeline goes on are locked. Unlock them, or put it on new tracks."
+                    return@launch
+                }
+            }
+            sources = sources + newSources
+            pushUndo()
+            videoTrackCount = needV
+            trackCount = needA
+            mutedTracks = mutedTracks + r.mutedAudio
+            val otioRate = otio.rate?.let { FrameRate.closestTo(it) }
+            if (wasEmpty) {
+                otioRate?.let { frameRate = it }
+                if (savedName == null && projectName == "Untitled") projectName = ProjectStore.safeName(otio.name)
+            }
+            applyClips(overwrite(clips, r.clips))
+            loadThumbnails(newSources.values)
+            revealPlayhead()
+            val left = otio.skipped + r.skipped
+            message = buildString {
+                append("Imported “${otio.name}”: ${r.clips.size} clip${if (r.clips.size == 1) "" else "s"}")
+                if (left > 0) append(". $left item${if (left == 1) "" else "s"} left out (missing media, titles, effects or compound clips)")
+                if (!wasEmpty && otioRate != null && otioRate != frameRate) {
+                    append(". It was ${otioRate.label} fps; this project is ${frameRate.label} fps")
+                }
+                append(failed)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ Colour (LUTs, exposure, highlights, shadows)
+
+    /** LUTs loaded into the app (.cube files), by name. */
+    var luts by mutableStateOf<Map<String, CubeLut>>(emptyMap()); private set
+
+    init {
+        viewModelScope.launch {
+            val saved = withContext(Dispatchers.IO) {
+                LutLibrary.names(ctx).mapNotNull { n -> runCatching { n to LutLibrary.load(ctx, n) }.getOrNull() }.toMap()
+            }
+            luts = saved + luts   // keeps any LUT loaded while these were being read
+        }
+    }
+
+    /** Loads a .cube LUT into the app and applies it to the selected video clip. */
+    fun importLut(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val (name, lut) = withContext(Dispatchers.IO) { LutLibrary.import(ctx, uri) }
+                luts = luts + (name to lut)
+                gradeTarget?.let { changeGrade(it.id, it.grade.copy(lut = name)) }
+                message = "LUT “$name” loaded"
+            } catch (e: Exception) {
+                message = "Couldn't load the LUT: ${e.message}"
+            }
+        }
+    }
+
+    /** Removes a LUT from the app. Clips using it keep its name but show without it. */
+    fun deleteLut(name: String) {
+        LutLibrary.delete(ctx, name)
+        luts = luts - name
+    }
+
+    /** The video clip the colour controls apply to: the selection, or the video linked to selected camera audio. */
+    val gradeTarget: Clip?
+        get() = selectedClip?.let { s -> if (s.video) s else group(s).firstOrNull { it.video } }
+
+    /** Call once when a colour slider drag starts, so the whole drag is one undo step. */
+    fun beginGradeEdit() = pushUndo()
+
+    /** Sets a clip's grade without an undo step (used while a slider is dragged). */
+    fun setGrade(clipId: Long, grade: Grade) {
+        applyClips(clips.map { if (it.id == clipId) it.copy(grade = grade) else it })
+    }
+
+    /** Sets a clip's grade as one undo step. */
+    fun changeGrade(clipId: Long, grade: Grade) {
+        if (clips.find { it.id == clipId }?.grade == grade) return
+        pushUndo()
+        setGrade(clipId, grade)
+    }
+
+    /** Copies [from]'s grade to the other video clips from the same file, or to every video clip when [all]. */
+    fun copyGrade(from: Clip, all: Boolean) {
+        val targets = clips.filter { it.video && it.id != from.id && (all || it.sourceId == from.sourceId) && isEditable(it) }
+        if (targets.isEmpty()) {
+            message = if (all) "There are no other video clips" else "There are no other clips from this file"
+            return
+        }
+        pushUndo()
+        val ids = targets.map { it.id }.toSet()
+        applyClips(clips.map { if (it.id in ids) it.copy(grade = from.grade) else it })
+        message = "Grade copied to ${targets.size} clip${if (targets.size == 1) "" else "s"}"
     }
 
     private fun loadThumbnails(list: Collection<AudioSource>) {
@@ -376,7 +656,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun updatePreview() = preview.update(clips, sources, playhead, isPlaying)
+    fun updatePreview() = preview.update(clips, sources, playhead, isPlaying, luts)
 
     fun seek(frame: Long) {
         if (isPlaying) { player.stop(); isPlaying = false }
@@ -756,7 +1036,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             SavedClip(
                 it.id, it.sourceId, it.track, it.start, it.sourceIn, it.length,
                 it.fadeIn.frames, it.fadeIn.curve.name, it.fadeOut.frames, it.fadeOut.curve.name,
-                it.video, it.linkId,
+                it.video, it.linkId, it.grade,
             )
         },
         videoTrackCount, mutedTracks,
@@ -821,6 +1101,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         fadeOut = Fade(c.fadeOutFrames, parseCurve(c.fadeOutCurve)),
                         video = c.video,
                         linkId = c.linkId,
+                        grade = c.grade,
                     )
                 }
                 sources = loaded

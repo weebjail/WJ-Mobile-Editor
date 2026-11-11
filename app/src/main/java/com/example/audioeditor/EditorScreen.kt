@@ -23,9 +23,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardTab
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -39,8 +41,12 @@ import androidx.compose.material.icons.filled.LastPage
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.LayersClear
 import androidx.compose.material.icons.filled.LibraryAdd
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.ZoomIn
@@ -121,6 +127,17 @@ fun EditorScreen(vm: EditorViewModel) {
     val otioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         uri?.let { vm.exportResolve(it, exportName.ifBlank { vm.projectName }, otio = true) }
     }
+    // .otio and .cube files have no standard MIME type, so any file can be picked.
+    val timelineLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
+        it?.let(vm::importTimeline)
+    }
+    val timelineMediaLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
+        if (it.isNotEmpty()) vm.otioMediaPicked(it)
+    }
+    val lutLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
+        it?.let(vm::importLut)
+    }
+    var showGrade by remember { mutableStateOf(false) }
 
     LaunchedEffect(vm.isPlaying) {
         while (vm.isPlaying) {
@@ -129,7 +146,7 @@ fun EditorScreen(vm: EditorViewModel) {
         }
     }
     LaunchedEffect(Unit) {
-        snapshotFlow { listOf(vm.playhead, vm.isPlaying, vm.clips, vm.sources) }.collect { vm.updatePreview() }
+        snapshotFlow { listOf(vm.playhead, vm.isPlaying, vm.clips, vm.sources, vm.luts) }.collect { vm.updatePreview() }
     }
     LaunchedEffect(vm.message) {
         vm.message?.let {
@@ -151,6 +168,9 @@ fun EditorScreen(vm: EditorViewModel) {
                     })
                     DropdownMenuItem(text = { Text("Save project…") }, onClick = { close(); dialog = Dialog.SAVE })
                     DropdownMenuItem(text = { Text("Open project…") }, onClick = { close(); dialog = Dialog.LOAD })
+                    DropdownMenuItem(text = { Text("Import DaVinci Resolve timeline (OTIO)…") }, onClick = {
+                        close(); timelineLauncher.launch(arrayOf("*/*"))
+                    })
                 }
                 MenuBtn(Icons.AutoMirrored.Default.PlaylistAdd, "Tracks") { close ->
                     DropdownMenuItem(text = { Text("Add audio track") }, onClick = { close(); vm.addAudioTrack() })
@@ -189,7 +209,9 @@ fun EditorScreen(vm: EditorViewModel) {
                 RippleAllToggle(vm, Modifier.size(TimelineHeaderWidth, TimelineRulerHeight))
             }
 
-            vm.fadeTarget?.let { FadePanel(vm, it) }
+            val gradeClip = if (showGrade) vm.gradeTarget else null
+            if (gradeClip != null) GradePanel(vm, gradeClip) { lutLauncher.launch(arrayOf("*/*")) }
+            else vm.fadeTarget?.let { FadePanel(vm, it) }
 
             // BOTTOM ROW 1: transport and history
             ToolRow {
@@ -218,10 +240,42 @@ fun EditorScreen(vm: EditorViewModel) {
                 IconBtn(Icons.Default.LastPage, "Ripple trim end to playhead", onClick = vm::rippleTrimEnd)
                 IconBtn(Icons.Default.ContentCut, "Cut at playhead", onClick = vm::cut)
                 IconBtn(Icons.Default.JoinFull, "Crossfade", onClick = vm::crossfade)
+                ToggleBtn(Icons.Default.Palette, if (showGrade) "Colour controls: on" else "Colour controls: off", showGrade) {
+                    showGrade = !showGrade
+                    if (showGrade && vm.gradeTarget == null) vm.message = "Tap a video clip to change its colour"
+                }
             }
         }
 
         vm.busy?.let { BusyOverlay(it) }
+    }
+
+    vm.pendingImport?.let { PlacementDialog(vm, it) }
+    vm.otioMedia?.let { req ->
+        AlertDialog(
+            onDismissRequest = vm::cancelOtio,
+            title = { Text("Find the media") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val n = req.missing.size
+                    Text(
+                        "“${req.otio.name}” uses ${if (n == 1) "a file that isn't" else "$n files that aren't"} in this project yet. " +
+                            "Select ${if (n == 1) "it" else "them"} on this phone (you can select several at once); " +
+                            "they're matched by file name."
+                    )
+                    Text(req.missing.joinToString("\n"), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { timelineMediaLauncher.launch(arrayOf("audio/*", "video/*")) }) { Text("Select files") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = vm::cancelOtio) { Text("Cancel") }
+                    TextButton(onClick = vm::otioSkipMissing) { Text("Leave out") }
+                }
+            },
+        )
     }
 
     when (dialog) {
@@ -637,6 +691,135 @@ private fun FadeControl(
             onValueChangeFinished = { editing = false },
             valueRange = 0f..maxFrames,
         )
+    }
+}
+
+/** Asked when importing onto a timeline that already has clips: where the new media (or timeline) should go. */
+@Composable
+private fun PlacementDialog(vm: EditorViewModel, req: EditorViewModel.PendingImport) {
+    val timeline = req is EditorViewModel.PendingImport.Timeline
+    val options = listOf(
+        Triple(Placement.PLAYHEAD, Icons.Default.MyLocation, "At the playhead" to
+            "Replaces whatever is there, like dropping a clip in Resolve"),
+        Triple(Placement.END, Icons.AutoMirrored.Default.KeyboardTab, "At the end of the timeline" to
+            "After the last clip"),
+        Triple(Placement.NEW_TRACK, Icons.AutoMirrored.Default.PlaylistAdd, (if (timeline) "On new tracks" else "On a new track") to
+            "Added below the existing tracks, starting at the playhead"),
+    )
+    AlertDialog(
+        onDismissRequest = { vm.choosePlacement(null) },
+        title = {
+            Text(
+                when (req) {
+                    is EditorViewModel.PendingImport.Timeline -> "Where should “${req.otio.name}” go?"
+                    is EditorViewModel.PendingImport.Media -> if (req.uris.size == 1) "Where should the file go?" else "Where should the files go?"
+                }
+            )
+        },
+        text = {
+            Column {
+                options.forEach { (p, icon, text) ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable { vm.choosePlacement(p) }.padding(vertical = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(icon, contentDescription = null)
+                        Column {
+                            Text(text.first, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                text.second, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = { vm.choosePlacement(null) }) { Text("Cancel") } },
+    )
+}
+
+/**
+ * Colour for the selected video clip, in Resolve's order: a LUT (e.g. GP-Log or F-Log to Rec.709), then exposure,
+ * highlights and shadows. Shown in place of the fade sliders while the colour button is on.
+ */
+@Composable
+private fun GradePanel(vm: EditorViewModel, clip: Clip, loadLut: () -> Unit) {
+    val g = clip.grade
+    Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                FilterChip(selected = g.lut == null, onClick = { vm.changeGrade(clip.id, g.copy(lut = null)) }, label = { Text("No LUT") })
+                // A LUT the project uses but that isn't loaded on this phone is still listed, marked as missing.
+                val names = (vm.luts.keys + listOfNotNull(g.lut)).distinct().sortedBy { it.lowercase() }
+                names.forEach { name ->
+                    FilterChip(
+                        selected = g.lut == name,
+                        onClick = { vm.changeGrade(clip.id, g.copy(lut = name)) },
+                        label = { Text(if (name in vm.luts) name else "$name (missing)") },
+                    )
+                }
+            }
+            IconBtn(Icons.Default.Add, "Load a LUT (.cube file)", onClick = loadLut)
+            IconBtn(Icons.Default.RestartAlt, "Reset colour", enabled = !g.isNeutral) { vm.changeGrade(clip.id, Grade()) }
+            MenuBtn(Icons.Default.MoreVert, "More colour options") { close ->
+                DropdownMenuItem(text = { Text("Copy to all clips from this file") }, onClick = { close(); vm.copyGrade(clip, all = false) })
+                DropdownMenuItem(text = { Text("Copy to all video clips") }, onClick = { close(); vm.copyGrade(clip, all = true) })
+                g.lut?.takeIf { it in vm.luts }?.let { name ->
+                    DropdownMenuItem(text = { Text("Remove LUT “$name” from the app") }, onClick = { close(); vm.deleteLut(name) })
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            GradeSlider("Exposure", g.exposure, -2f..2f, "%+.1f".format(g.exposure), Modifier.weight(1f), vm::beginGradeEdit) {
+                vm.setGrade(clip.id, g.copy(exposure = (it * 10).toInt() / 10f))
+            }
+            GradeSlider("Highlights", g.highlights, -1f..1f, "%+d".format((g.highlights * 100).toInt()), Modifier.weight(1f), vm::beginGradeEdit) {
+                vm.setGrade(clip.id, g.copy(highlights = (it * 100).toInt() / 100f))
+            }
+            GradeSlider("Shadows", g.shadows, -1f..1f, "%+d".format((g.shadows * 100).toInt()), Modifier.weight(1f), vm::beginGradeEdit) {
+                vm.setGrade(clip.id, g.copy(shadows = (it * 100).toInt() / 100f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun GradeSlider(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    shown: String,
+    modifier: Modifier,
+    onStart: () -> Unit,
+    onChange: (Float) -> Unit,
+) {
+    var editing by remember { mutableStateOf(false) }
+    Column(modifier) {
+        Text("$label $shown", style = MaterialTheme.typography.bodySmall)
+        Slider(
+            value = value,
+            onValueChange = {
+                if (!editing) { onStart(); editing = true }
+                onChange(it)
+            },
+            onValueChangeFinished = { editing = false },
+            valueRange = range,
+        )
+    }
+}
+
+/** A symbol button that stays highlighted while switched on. */
+@Composable
+private fun ToggleBtn(icon: ImageVector, label: String, on: Boolean, onClick: () -> Unit) {
+    Labeled(label) {
+        if (on) FilledIconButton(onClick = onClick) { Icon(icon, contentDescription = label) }
+        else IconButton(onClick = onClick) { Icon(icon, contentDescription = label) }
     }
 }
 

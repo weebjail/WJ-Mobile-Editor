@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -14,6 +16,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import kotlin.math.abs
 
@@ -26,7 +29,11 @@ import kotlin.math.abs
  * instead, which is invisible. Only big jumps (starting, a new clip, a large gap) seek, and they aim ahead
  * by however long seeks have been taking on this phone so the video lands in step.
  */
+@androidx.annotation.OptIn(UnstableApi::class)
 class VideoPreview(context: Context) {
+    /** The colour grade of the clip being shown, read on the GPU for every frame. */
+    private val liveGrade = LiveGrade()
+
     val player: ExoPlayer = ExoPlayer.Builder(context).build().apply {
         volume = 0f
         // The preview's sound comes from our own mixer; don't decode the video's audio at all. This also
@@ -34,6 +41,9 @@ class VideoPreview(context: Context) {
         trackSelectionParameters = trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
             .build()
+        // Every frame goes through the colour pass (LUT, exposure, highlights, shadows). Effects have to be set
+        // before the first video is loaded; with a neutral grade the pass leaves the picture unchanged.
+        setVideoEffects(listOf(GradeEffect(liveGrade)))
         addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY && seekPending) {
@@ -70,7 +80,40 @@ class VideoPreview(context: Context) {
         player.seekTo((targetMs + seekLeadMs).coerceAtMost(clipEndMs))
     }
 
-    fun update(clips: List<Clip>, sources: Map<Long, AudioSource>, playhead: Long, playing: Boolean) {
+    private val handler = Handler(Looper.getMainLooper())
+    private var lastRefreshAt = 0L
+    private var shownGrade: Grade? = null
+    private var shownLut: CubeLut? = null
+    private val refreshRunnable = Runnable { refreshNow() }
+
+    /**
+     * While paused, a new grade only shows once the frame is drawn again, which re-seeking to the same spot does.
+     * Dragging a slider asks for this many times a second, so seeks are limited to a few a second, ending on the latest.
+     */
+    private fun requestRefresh() {
+        handler.removeCallbacks(refreshRunnable)
+        val wait = REFRESH_MS - (SystemClock.uptimeMillis() - lastRefreshAt)
+        if (wait <= 0) refreshNow() else handler.postDelayed(refreshRunnable, wait)
+    }
+
+    private fun refreshNow() {
+        if (player.playWhenReady || !hasFrame) return
+        lastRefreshAt = SystemClock.uptimeMillis()
+        player.seekTo(player.currentPosition)
+    }
+
+    /** Shows [grade] ([lut] is the loaded LUT it names, if any). Returns true if it changed. */
+    private fun setGrade(grade: Grade, lut: CubeLut?): Boolean {
+        if (grade == shownGrade && lut === shownLut) return false
+        shownGrade = grade
+        shownLut = lut
+        liveGrade.state = GradeState(lut, grade.exposure, grade.highlights, grade.shadows)
+        return true
+    }
+
+    fun update(
+        clips: List<Clip>, sources: Map<Long, AudioSource>, playhead: Long, playing: Boolean, luts: Map<String, CubeLut>,
+    ) {
         // The highest video track wins, as in Resolve (V2 covers V1).
         val clip = clips.filter { it.video && playhead >= it.start && playhead < it.end }.maxByOrNull { it.track }
         val src = clip?.let { sources[it.sourceId] }
@@ -80,6 +123,7 @@ class VideoPreview(context: Context) {
             return
         }
         hasFrame = true
+        val gradeChanged = setGrade(clip.grade, clip.grade.lut?.let { luts[it] })
         if (src.uri != currentUri) {
             player.setMediaItem(MediaItem.fromUri(src.uri))
             player.prepare()
@@ -114,11 +158,16 @@ class VideoPreview(context: Context) {
             if (targetMs != lastSeekMs) {
                 player.seekTo(targetMs)
                 lastSeekMs = targetMs
+            } else if (gradeChanged) {
+                requestRefresh()
             }
         }
     }
 
-    fun release() = player.release()
+    fun release() {
+        handler.removeCallbacks(refreshRunnable)
+        player.release()
+    }
 
     private companion object {
         const val IN_SYNC_MS = 25L           // about one video frame
@@ -126,6 +175,7 @@ class VideoPreview(context: Context) {
         const val MAX_DRIFT_MS = 1000L
         const val SEEK_SETTLE_MS = 1500L
         const val MAX_LEAD_MS = 800L
+        const val REFRESH_MS = 120L
     }
 }
 

@@ -18,6 +18,7 @@ data class SavedClip(
     val fadeOutCurve: String,
     val video: Boolean = false,
     val linkId: Long? = null,
+    val grade: Grade = Grade(),
 )
 
 data class SavedSource(
@@ -145,6 +146,12 @@ object ProjectStore {
                     put("fadeOutCurve", c.fadeOutCurve)
                     put("video", c.video)
                     c.linkId?.let { put("linkId", it) }
+                    if (!c.grade.isNeutral) put("grade", JSONObject().apply {
+                        c.grade.lut?.let { put("lut", it) }
+                        put("exposure", c.grade.exposure.toDouble())
+                        put("highlights", c.grade.highlights.toDouble())
+                        put("shadows", c.grade.shadows.toDouble())
+                    })
                 })
             }
             put("clips", clipsArray)
@@ -202,6 +209,14 @@ object ProjectStore {
                 fadeOutCurve = o.optString("fadeOutCurve", "LINEAR"),
                 video = o.optBoolean("video", false),
                 linkId = if (o.has("linkId")) o.getLong("linkId") else null,
+                grade = o.optJSONObject("grade")?.let { g ->
+                    Grade(
+                        lut = if (g.has("lut")) g.getString("lut") else null,
+                        exposure = g.optDouble("exposure", 0.0).toFloat(),
+                        highlights = g.optDouble("highlights", 0.0).toFloat(),
+                        shadows = g.optDouble("shadows", 0.0).toFloat(),
+                    )
+                } ?: Grade(),
             )
         }
         return ProjectData(

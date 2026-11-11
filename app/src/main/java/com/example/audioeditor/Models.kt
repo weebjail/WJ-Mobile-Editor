@@ -68,6 +68,7 @@ data class Clip(
     val fadeOut: Fade = Fade(),
     val video: Boolean = false,
     val linkId: Long? = null,
+    val grade: Grade = Grade(),   // colour (video clips only)
 ) {
     val end: Long get() = start + length
 
