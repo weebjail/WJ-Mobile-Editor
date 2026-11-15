@@ -3,6 +3,7 @@ package com.example.audioeditor
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.os.Build
 
 /**
  * Mixes all audio clips (with their fades) into stereo audio. Used for playback, export and sync.
@@ -38,21 +39,31 @@ class Mixer(private val sources: Map<Long, AudioSource>, clips: List<Clip>, mute
     }
 }
 
-/** Streams the mix to the speaker/headphones on a background thread. */
+/**
+ * Streams the mix to the speaker/headphones on a background thread.
+ *
+ * To start quickly, the audio output is opened once and kept between plays (opening it takes a noticeable
+ * moment), and each play fills the buffer with sound before starting the output, so nothing waits on an
+ * empty buffer.
+ */
 class Player {
     @Volatile private var mixer: Mixer? = null
     @Volatile private var running = false
-    private var track: AudioTrack? = null
+    private val lock = Any()
+    @Volatile private var track: AudioTrack? = null
     private var thread: Thread? = null
-    private var startFrame = 0L
+    @Volatile private var startFrame = 0L
+    @Volatile private var headBase = 0L   // the track's position counter when this play started
 
     /** Lets edits made during playback be heard immediately. */
     fun updateMixer(m: Mixer) { mixer = m }
 
-    fun play(from: Long, m: Mixer) {
-        stop()
-        mixer = m
-        startFrame = from
+    /** Opens the audio output ahead of time, so the first play doesn't wait for it. Safe on any thread. */
+    fun prepare() { synchronized(lock) { openTrack() } }
+
+    /** The open audio output, opening it if needed (call holding [lock]). */
+    private fun openTrack(): AudioTrack {
+        track?.let { if (it.state == AudioTrack.STATE_INITIALIZED) return it; it.release() }
         val minBuf = AudioTrack.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_FLOAT,
         )
@@ -74,41 +85,89 @@ class Player {
             .setBufferSizeInBytes(maxOf(minBuf, 8192 * 8))
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
+        // Start as soon as a little audio is ready instead of waiting for the whole buffer (Android 12+).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try { t.setStartThresholdInFrames(START_FRAMES) } catch (_: Exception) {}
+        }
         track = t
-        running = true
-        t.play()
+        return t
+    }
+
+    fun play(from: Long, m: Mixer) {
+        stop()
+        val t = synchronized(lock) {
+            mixer = m
+            startFrame = from
+            val t = openTrack()
+            headBase = t.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+            running = true
+            t
+        }
         thread = Thread({
             val n = 1024
             val buf = FloatArray(n * 2)
             var pos = from
+            var started = false
+            fun startOutput() {
+                synchronized(lock) {
+                    if (running && !started) {
+                        try { t.play() } catch (_: IllegalStateException) { running = false }
+                        started = true
+                    }
+                }
+            }
             while (running) {
                 val mx = mixer ?: break
                 if (pos >= mx.totalFrames) break
                 mx.render(pos, n, buf)
                 var off = 0
                 while (off < buf.size && running) {
-                    val w = t.write(buf, off, buf.size - off, AudioTrack.WRITE_BLOCKING)
-                    if (w < 0) { running = false; break }
+                    // Until the output starts, fill the buffer without waiting; once it's full, start it.
+                    val mode = if (started) AudioTrack.WRITE_BLOCKING else AudioTrack.WRITE_NON_BLOCKING
+                    val w = t.write(buf, off, buf.size - off, mode)
+                    if (w < 0) {
+                        // The output broke (e.g. the audio device went away): open a fresh one next time.
+                        synchronized(lock) { running = false; if (track === t) { t.release(); track = null } }
+                        break
+                    }
                     off += w   // a 0-byte write just retries, so no audio is skipped
+                    if (!started && off < buf.size) startOutput()
                 }
                 pos += n
             }
+            // Less audio than a full buffer before the end: play what was written.
+            if (!started) startOutput()
         }, "playback").apply { start() }
     }
 
     /** Current playback position on the timeline, in frames. */
     fun position(): Long {
         val t = track ?: return startFrame
-        return startFrame + (t.playbackHeadPosition.toLong() and 0xFFFFFFFFL)
+        val raw = try { t.playbackHeadPosition.toLong() and 0xFFFFFFFFL } catch (_: Exception) { return startFrame }
+        // Some phones only reset the counter after the flush has gone through: count from zero then.
+        if (raw < headBase) headBase = 0L
+        return startFrame + (raw - headBase)
     }
 
+    /** Stops playback; the audio output stays open, ready for the next play. */
     fun stop() {
-        running = false
-        val t = track
-        try { t?.pause(); t?.flush() } catch (_: IllegalStateException) {}
+        val t = synchronized(lock) {
+            running = false
+            track?.also { try { it.pause(); it.flush() } catch (_: IllegalStateException) {} }
+        }
         thread?.join(1000)
         thread = null
-        t?.release()
-        track = null
+        // The playback thread may have written a little more before it noticed the stop.
+        synchronized(lock) { if (track === t) try { t?.flush() } catch (_: IllegalStateException) {} }
+    }
+
+    /** Closes the audio output for good. */
+    fun release() {
+        stop()
+        synchronized(lock) { track?.release(); track = null }
+    }
+
+    private companion object {
+        const val START_FRAMES = 2048
     }
 }

@@ -157,6 +157,18 @@ object TimelineOps {
             a = a.copy(length = cut - a.start)
             b = b.copy(start = cut, sourceIn = b.sourceIn + (cut - b.start), length = b.end - cut)
         }
+        if (duration <= 0) {
+            // No crossfade: just the plain cut.
+            val plainA = a.copy(fadeOut = Fade(0L, curve))
+            val plainB = b.copy(fadeIn = Fade(0L, curve))
+            return CrossfadeResult.Done(clips.map {
+                when (it.id) {
+                    plainA.id -> plainA
+                    plainB.id -> plainB
+                    else -> it
+                }
+            })
+        }
         val cut = b.start
         val gap = cut - a.end                                         // 0 when touching
         val handleA = sourceFrames(a.sourceId) - (a.sourceIn + a.length) - gap

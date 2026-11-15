@@ -59,6 +59,27 @@ class TimelineOpsTest {
         assertEquals(9 * sec, out[2]!!.start)
     }
 
+    @Test fun crossfadeCanBeResizedAndRemoved() {
+        val a = Clip(1, 1, 0, 0, 0, 10 * sec)
+        val b = Clip(2, 2, 0, 10 * sec, 5 * sec, 10 * sec)
+        val first = (TimelineOps.crossfade(listOf(a, b), b, 10 * sec, sec, FadeCurve.CURVED) { 20 * sec }
+            as TimelineOps.CrossfadeResult.Done).clips
+        // Lengthen it to 2 s, still centred on the original cut.
+        val nb = first.first { it.id == 2L }
+        val longer = (TimelineOps.crossfade(first, nb, nb.start, 2 * sec, FadeCurve.CURVED) { 20 * sec }
+            as TimelineOps.CrossfadeResult.Done).clips.associateBy { it.id }
+        assertEquals(11 * sec, longer[1]!!.end)
+        assertEquals(9 * sec, longer[2]!!.start)
+        // Length 0 goes back to the plain cut with no fades.
+        val none = (TimelineOps.crossfade(first, nb, nb.start, 0, FadeCurve.CURVED) { 20 * sec }
+            as TimelineOps.CrossfadeResult.Done).clips.associateBy { it.id }
+        assertEquals(10 * sec, none[1]!!.end)
+        assertEquals(10 * sec, none[2]!!.start)
+        assertEquals(5 * sec, none[2]!!.sourceIn)
+        assertEquals(0L, none[1]!!.fadeOut.frames)
+        assertEquals(0L, none[2]!!.fadeIn.frames)
+    }
+
     @Test fun crossfadeWithNoHandlesIsRefused() {
         val a = Clip(1, 1, 0, 0, 0, 10 * sec)
         val b = Clip(2, 2, 0, 10 * sec, 0, 10 * sec)

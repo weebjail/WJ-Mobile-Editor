@@ -67,6 +67,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TooltipBox
@@ -148,7 +149,7 @@ fun EditorScreen(vm: EditorViewModel) {
         }
     }
     LaunchedEffect(Unit) {
-        snapshotFlow { listOf(vm.playhead, vm.isPlaying, vm.clips, vm.sources, vm.luts) }.collect { vm.updatePreview() }
+        snapshotFlow { listOf(vm.playhead, vm.playbackRunning, vm.clips, vm.sources, vm.luts) }.collect { vm.updatePreview() }
     }
     LaunchedEffect(vm.message) {
         vm.message?.let {
@@ -701,6 +702,21 @@ private fun SettingsDialog(vm: EditorViewModel, close: () -> Unit) {
                     valueRange = 0.25f..4f,
                     steps = 14,
                 )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        tr("Pause playback when the playhead is moved", "再生ヘッドを動かしたら再生を一時停止"),
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(checked = vm.pauseOnSeek, onCheckedChange = vm::updatePauseOnSeek)
+                }
+                Text(
+                    tr(
+                        "When off, playback carries on from wherever you put the playhead.",
+                        "オフのときは、再生ヘッドを置いた位置から再生が続きます。",
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 // Each language is written in its own script, so it can be found whichever one is showing.
                 Text(tr("Language", "言語") + " / Language", style = MaterialTheme.typography.titleMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -725,11 +741,20 @@ private fun FadePanel(vm: EditorViewModel, clip: Clip) {
         horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        FadeControl(tr("Fade In", "フェードイン"), clip.fadeIn, clip.length - clip.fadeOut.frames, Modifier.weight(1f), vm::beginFadeEdit) {
-            vm.setFade(clip.id, fadeIn = it)
-        }
-        FadeControl(tr("Fade Out", "フェードアウト"), clip.fadeOut, clip.length - clip.fadeIn.frames, Modifier.weight(1f), vm::beginFadeEdit) {
-            vm.setFade(clip.id, fadeOut = it)
+        // Over a crossfade, one slider sets the whole transition (both clips' sides change together).
+        val xf = vm.crossfadeAtPlayhead
+        if (xf != null) {
+            FadeControl(
+                tr("Crossfade", "クロスフェード"), xf.frames, vm.maxCrossfadeFrames(xf), Modifier.weight(1f),
+                onStart = { vm.beginCrossfadeEdit(xf) }, onEnd = vm::endCrossfadeEdit,
+            ) { vm.setCrossfadeLength(xf, it) }
+        } else {
+            FadeControl(tr("Fade In", "フェードイン"), clip.fadeIn.frames, clip.length - clip.fadeOut.frames, Modifier.weight(1f), vm::beginFadeEdit) {
+                vm.setFade(clip.id, fadeIn = clip.fadeIn.copy(frames = it))
+            }
+            FadeControl(tr("Fade Out", "フェードアウト"), clip.fadeOut.frames, clip.length - clip.fadeIn.frames, Modifier.weight(1f), vm::beginFadeEdit) {
+                vm.setFade(clip.id, fadeOut = clip.fadeOut.copy(frames = it))
+            }
         }
     }
 }
@@ -737,11 +762,12 @@ private fun FadePanel(vm: EditorViewModel, clip: Clip) {
 @Composable
 private fun FadeControl(
     label: String,
-    fade: Fade,
+    frames: Long,
     available: Long,
     modifier: Modifier,
     onStart: () -> Unit,
-    onChange: (Fade) -> Unit,
+    onEnd: () -> Unit = {},
+    onChange: (Long) -> Unit,
 ) {
     var editing by remember { mutableStateOf(false) }
     val maxFrames = minOf(available, 10L * SAMPLE_RATE).coerceAtLeast(1L)
@@ -749,16 +775,16 @@ private fun FadeControl(
     val maxPos = fadeSliderPos(maxFrames)
     Column(modifier) {
         Text(
-            "$label ${"%.2f".format(fade.frames / SAMPLE_RATE.toFloat())}" + tr("s", "秒"),
+            "$label ${"%.2f".format(frames / SAMPLE_RATE.toFloat())}" + tr("s", "秒"),
             style = MaterialTheme.typography.bodySmall,
         )
         Slider(
-            value = fadeSliderPos(fade.frames).coerceAtMost(maxPos),
+            value = fadeSliderPos(frames).coerceAtMost(maxPos),
             onValueChange = {
                 if (!editing) { onStart(); editing = true }
-                onChange(fade.copy(frames = fadeSliderFrames(it).coerceAtMost(maxFrames)))
+                onChange(fadeSliderFrames(it).coerceAtMost(maxFrames))
             },
-            onValueChangeFinished = { editing = false },
+            onValueChangeFinished = { editing = false; onEnd() },
             valueRange = 0f..maxPos,
         )
     }

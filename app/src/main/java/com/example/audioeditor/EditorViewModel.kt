@@ -36,6 +36,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         viewModelScope.launch(Dispatchers.IO) { AudioDecoder.trimCache(ctx) }
+        viewModelScope.launch(Dispatchers.IO) { player.prepare() }   // so the first play starts promptly
     }
 
     // ------------------------------------------------------------ Settings
@@ -74,6 +75,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun updateRippleAllTracks(on: Boolean) {
         rippleAllTracks = on
         prefs.edit().putBoolean(KEY_RIPPLE_ALL, on).apply()
+    }
+
+    /**
+     * When on, moving the playhead during playback pauses it. Off (the default): playback carries on from
+     * wherever the playhead is put, as in Resolve.
+     */
+    var pauseOnSeek by mutableStateOf(prefs.getBoolean(KEY_PAUSE_ON_SEEK, false)); private set
+
+    fun updatePauseOnSeek(on: Boolean) {
+        pauseOnSeek = on
+        prefs.edit().putBoolean(KEY_PAUSE_ON_SEEK, on).apply()
     }
 
     fun updateCrossfadeSeconds(s: Float) {
@@ -673,14 +685,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun stop() {
         if (!isPlaying) return
-        playhead = player.position()
+        if (!scrubHeld) playhead = player.position()
         player.stop()
         isPlaying = false
+        scrubHeld = false
     }
+
+    /**
+     * True while the playhead is being dragged during playback: the sound holds, and playback carries on from
+     * wherever the playhead is let go (see [endScrub]).
+     */
+    private var scrubHeld by mutableStateOf(false)
+
+    /** Playing and actually moving (not held while the playhead is dragged). */
+    val playbackRunning: Boolean get() = isPlaying && !scrubHeld
 
     /** Called every screen frame while playing. */
     fun tickPlayback() {
-        if (!isPlaying) return
+        if (!isPlaying || scrubHeld) return
         val p = player.position()
         playhead = p
         if (p >= totalFrames) {
@@ -692,10 +714,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun updatePreview() = preview.update(clips, sources, playhead, isPlaying, luts)
+    fun updatePreview() = preview.update(clips, sources, playhead, playbackRunning, luts)
 
+    /** Moves the playhead. During playback this pauses (if [pauseOnSeek]) or holds until [endScrub]. */
     fun seek(frame: Long) {
-        if (isPlaying) { player.stop(); isPlaying = false }
+        if (isPlaying) {
+            if (pauseOnSeek) stop()
+            else if (!scrubHeld) { player.stop(); scrubHeld = true }
+        }
         playhead = frame.coerceAtLeast(0L)
     }
 
@@ -718,8 +744,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         snapLine = line
     }
 
-    /** Call when the finger lifts after [scrubTo]. */
-    fun endScrub() { snapLine = null }
+    /** Call when the finger lifts after [scrubTo]. Playback that was held carries on from the new spot. */
+    fun endScrub() {
+        snapLine = null
+        if (!scrubHeld) return
+        scrubHeld = false
+        if (playhead >= totalFrames) { isPlaying = false; return }
+        player.play(playhead, mixer())
+    }
 
     // ------------------------------------------------------------ Editing
 
@@ -869,6 +901,71 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 c.withValidFades()
             }
         })
+    }
+
+    // ------------------------------------------------------------ Crossfade length
+
+    /** Two overlapping clips on one track: [out] fades out while [into] fades in. */
+    data class CrossfadePair(val out: Clip, val into: Clip) {
+        val frames: Long get() = out.end - into.start
+    }
+
+    /** The clips before the current crossfade-slider drag, so every step is worked out from the same start. */
+    private var crossfadeBase: List<Clip>? = null
+    private var crossfadeIds by mutableStateOf<Pair<Long, Long>?>(null)
+
+    /**
+     * The crossfade the playhead is over, on the fade target's track (it then gets one crossfade slider instead
+     * of separate fade in/out sliders). While its slider is being dragged it stays, even if it shrinks away.
+     */
+    val crossfadeAtPlayhead: CrossfadePair?
+        get() {
+            crossfadeIds?.let { (a, b) ->
+                val out = clips.find { it.id == a }
+                val into = clips.find { it.id == b }
+                if (out != null && into != null) return CrossfadePair(out, into)
+            }
+            val t = fadeTarget ?: return null
+            val lane = clips.filter { it.sameLane(t) }.sortedBy { it.start }
+            for (i in TimelineOps.crossfadePairs(lane)) {
+                val a = lane[i]
+                val b = lane[i + 1]
+                if ((t.id == a.id || t.id == b.id) && playhead >= b.start && playhead < a.end) return CrossfadePair(a, b)
+            }
+            return null
+        }
+
+    private fun sourceLength(id: Long): Long = sources[id]?.let { it.pcm?.frames ?: it.frames } ?: 0L
+
+    /** Rebuilds the crossfade between [p]'s clips at [frames] long (0 = a plain cut), centred on the same cut. */
+    private fun crossfadeOf(base: List<Clip>, p: CrossfadePair, frames: Long): List<Clip>? {
+        val into = base.find { it.id == p.into.id } ?: return null
+        val r = TimelineOps.crossfade(base, into, into.start, frames, defaultCurve, ::sourceLength)
+        return (r as? TimelineOps.CrossfadeResult.Done)?.clips
+    }
+
+    /** The longest crossfade (up to 10 s) the media either side of the cut allows. */
+    fun maxCrossfadeFrames(p: CrossfadePair): Long {
+        val new = crossfadeOf(crossfadeBase ?: clips, p, 10L * SAMPLE_RATE) ?: return p.frames
+        val a = new.find { it.id == p.out.id } ?: return p.frames
+        val b = new.find { it.id == p.into.id } ?: return p.frames
+        return maxOf(a.end - b.start, p.frames)
+    }
+
+    /** Call once when a crossfade slider drag starts, so the whole drag is one undo step. */
+    fun beginCrossfadeEdit(p: CrossfadePair) {
+        pushUndo()
+        crossfadeBase = clips
+        crossfadeIds = p.out.id to p.into.id
+    }
+
+    fun setCrossfadeLength(p: CrossfadePair, frames: Long) {
+        crossfadeOf(crossfadeBase ?: clips, p, frames)?.let(::applyClips)
+    }
+
+    fun endCrossfadeEdit() {
+        crossfadeBase = null
+        crossfadeIds = null
     }
 
     // ------------------------------------------------------------ Dragging clips (linked clips move together)
@@ -1305,7 +1402,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
-        player.stop()
+        player.release()
         preview.release()
     }
 
@@ -1313,6 +1410,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_CURVE = "defaultCurve"
         const val KEY_XFADE = "crossfadeSeconds"
         const val KEY_RIPPLE_ALL = "rippleAllTracks"
+        const val KEY_PAUSE_ON_SEEK = "pauseOnSeek"
         const val KEY_RESOLVE_FOLDER = "resolveMediaFolder"
         const val AUTOSAVE_NAME = "Autosave"
         val UNTITLED_NAMES = setOf("Untitled", "無題")
