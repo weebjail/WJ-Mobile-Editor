@@ -95,6 +95,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import kotlin.math.ln
+import kotlin.math.roundToLong
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -676,23 +678,32 @@ private fun FadeControl(
     onChange: (Fade) -> Unit,
 ) {
     var editing by remember { mutableStateOf(false) }
-    val maxFrames = minOf(available, 10L * SAMPLE_RATE).coerceAtLeast(1L).toFloat()
+    val maxFrames = minOf(available, 10L * SAMPLE_RATE).coerceAtLeast(1L)
+    // The slider is exponential: halfway is 2.5s, the far end 10s, so short fades get most of the travel.
+    val maxPos = fadeSliderPos(maxFrames)
     Column(modifier) {
         Text(
             "Fade $label ${"%.2f".format(fade.frames / SAMPLE_RATE.toFloat())}s",
             style = MaterialTheme.typography.bodySmall,
         )
         Slider(
-            value = fade.frames.toFloat().coerceAtMost(maxFrames),
+            value = fadeSliderPos(fade.frames).coerceAtMost(maxPos),
             onValueChange = {
                 if (!editing) { onStart(); editing = true }
-                onChange(fade.copy(frames = it.toLong()))
+                onChange(fade.copy(frames = fadeSliderFrames(it).coerceAtMost(maxFrames)))
             },
             onValueChangeFinished = { editing = false },
-            valueRange = 0f..maxFrames,
+            valueRange = 0f..maxPos,
         )
     }
 }
+
+// Fade slider curve: seconds = 1.25 * (9^pos - 1), so pos 0 -> 0s, 0.5 -> 2.5s, 1 -> 10s.
+private fun fadeSliderFrames(pos: Float): Long =
+    (1.25 * (Math.pow(9.0, pos.toDouble()) - 1.0) * SAMPLE_RATE).roundToLong().coerceAtLeast(0L)
+
+private fun fadeSliderPos(frames: Long): Float =
+    (ln(frames.toDouble() / SAMPLE_RATE / 1.25 + 1.0) / ln(9.0)).toFloat()
 
 /** Asked when importing onto a timeline that already has clips: where the new media (or timeline) should go. */
 @Composable
