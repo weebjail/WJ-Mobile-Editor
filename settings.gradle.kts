@@ -22,6 +22,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "AudioEditor"
+rootProject.name = "WJ Mobile Editor"
 include(":app")
  
