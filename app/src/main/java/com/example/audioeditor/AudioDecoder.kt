@@ -60,7 +60,7 @@ object AudioDecoder {
         val pcm: PcmData?
         val wav = openWavInPlace(context, uri)
         if (wav != null) {
-            if (wav.frames <= 0) throw IOException("${ident.name} contains no audio")
+            if (wav.frames <= 0) throw IOException(tr("${ident.name} contains no audio", "${ident.name}には音声がありません"))
             meta = cached?.takeIf { it.kind == KIND_WAV && it.audioFrames == wav.frames }
                 ?: Meta(
                     KIND_WAV, wav.frames, wav.frames, wav.layout.sampleRate, wav.layout.channels, wav.layout.bits,
@@ -117,7 +117,7 @@ object AudioDecoder {
             ex.setDataSource(context, uri, null)
         } catch (e: Exception) {
             ex.release()
-            throw IOException("Couldn't open the file", e)
+            throw IOException(tr("Couldn't open the file", "ファイルを開けませんでした"), e)
         }
         return ex
     }
@@ -129,13 +129,13 @@ object AudioDecoder {
         val track = audioTrackIndex(ex)
         if (track < 0) {
             ex.release()
-            if (video == null || video.frames <= 0) throw IOException("This file has no audio the phone can read")
+            if (video == null || video.frames <= 0) throw IOException(tr("This file has no audio the phone can read", "このファイルにはスマートフォンで読み取れる音声がありません"))
             return Meta(KIND_NONE, 0, video.frames, 0, 0, 0, FloatArray(0), video.info)
         }
         val format = ex.getTrackFormat(track)
         val scan = DecodedPcm.scan(ex, track)   // takes ownership of the extractor
         val audioFrames = framesAt48k(scan.srcFrames, scan.srcRate)
-        if (audioFrames <= 0) throw IOException("$name contains no audio")
+        if (audioFrames <= 0) throw IOException(tr("$name contains no audio", "${name}には音声がありません"))
         return Meta(
             KIND_DECODED, audioFrames, maxOf(audioFrames, video?.frames ?: 0L),
             format.getInteger(MediaFormat.KEY_SAMPLE_RATE), format.getInteger(MediaFormat.KEY_CHANNEL_COUNT), 16,
@@ -185,7 +185,7 @@ object AudioDecoder {
             o.writeInt(pts.size)
             for (i in 0 until pts.size) { o.writeLong(pts.ptsUs[i]); o.writeLong(pts.frames[i]) }
         }
-        if (!tmp.renameTo(file)) { tmp.delete(); throw IOException("Couldn't save the waveform") }
+        if (!tmp.renameTo(file)) { tmp.delete(); throw IOException(tr("Couldn't save the waveform", "波形を保存できませんでした")) }
     }
 
     private fun readMeta(file: File): Meta? {

@@ -109,27 +109,27 @@ class CubeLut(
                 val key = parts[0].uppercase()
                 when {
                     key == "LUT_3D_SIZE" -> {
-                        size = parts.getOrNull(1)?.toIntOrNull() ?: throw IOException("Bad LUT_3D_SIZE")
-                        if (size !in 2..256) throw IOException("Unsupported LUT size $size")
+                        size = parts.getOrNull(1)?.toIntOrNull() ?: throw IOException(tr("Bad LUT_3D_SIZE", "LUT_3D_SIZEが不正です"))
+                        if (size !in 2..256) throw IOException(tr("Unsupported LUT size $size", "対応していないLUTサイズです: $size"))
                         values = FloatArray(size * size * size * 3)
                     }
-                    key == "LUT_1D_SIZE" -> throw IOException("This is a 1D LUT; only 3D LUTs are supported")
+                    key == "LUT_1D_SIZE" -> throw IOException(tr("This is a 1D LUT; only 3D LUTs are supported", "これは1D LUTです。対応しているのは3D LUTのみです"))
                     key == "DOMAIN_MIN" || key == "DOMAIN_MAX" -> {
                         val target = if (key == "DOMAIN_MIN") min else max
-                        for (c in 0 until 3) target[c] = parts.getOrNull(c + 1)?.toFloatOrNull() ?: throw IOException("Bad $key")
+                        for (c in 0 until 3) target[c] = parts.getOrNull(c + 1)?.toFloatOrNull() ?: throw IOException(tr("Bad $key", "${key}が不正です"))
                     }
                     key == "TITLE" || key.startsWith("LUT_") || key[0].isLetter() -> {}   // other keywords
                     else -> {
-                        val v = values ?: throw IOException("LUT_3D_SIZE is missing")
-                        if (parts.size < 3) throw IOException("Bad line: $line")
-                        if (count + 3 > v.size) throw IOException("Too many entries")
-                        for (c in 0 until 3) v[count++] = parts[c].toFloatOrNull() ?: throw IOException("Bad number: ${parts[c]}")
+                        val v = values ?: throw IOException(tr("LUT_3D_SIZE is missing", "LUT_3D_SIZEがありません"))
+                        if (parts.size < 3) throw IOException(tr("Bad line: ", "不正な行: ") + line)
+                        if (count + 3 > v.size) throw IOException(tr("Too many entries", "エントリーが多すぎます"))
+                        for (c in 0 until 3) v[count++] = parts[c].toFloatOrNull() ?: throw IOException(tr("Bad number: ", "不正な数値: ") + parts[c])
                     }
                 }
             }
-            val v = values ?: throw IOException("Not a 3D .cube LUT")
-            if (count != v.size) throw IOException("The LUT is incomplete (${count / 3} of ${v.size / 3} entries)")
-            for (c in 0 until 3) if (max[c] <= min[c]) throw IOException("Bad DOMAIN_MIN / DOMAIN_MAX")
+            val v = values ?: throw IOException(tr("Not a 3D .cube LUT", "3Dの.cube LUTではありません"))
+            if (count != v.size) throw IOException(tr("The LUT is incomplete (${count / 3} of ${v.size / 3} entries)", "LUTが不完全です（${v.size / 3}エントリー中${count / 3}）"))
+            for (c in 0 until 3) if (max[c] <= min[c]) throw IOException(tr("Bad DOMAIN_MIN / DOMAIN_MAX", "DOMAIN_MIN / DOMAIN_MAXが不正です"))
             return CubeLut(size, v, min, max)
         }
 
@@ -169,7 +169,7 @@ object LutLibrary {
     /** Copies a .cube file into the library (checking that it reads), returning its name and contents. */
     fun import(context: Context, uri: Uri): Pair<String, CubeLut> {
         val text = context.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
-            ?: throw IOException("Couldn't open the file")
+            ?: throw IOException(tr("Couldn't open the file", "ファイルを開けませんでした"))
         val lut = CubeLut.parse(text)
         val name = ProjectStore.safeName(AudioDecoder.displayName(context, uri).removeSuffix(".cube").removeSuffix(".CUBE"))
         File(dir(context), "$name.cube").writeText(text)

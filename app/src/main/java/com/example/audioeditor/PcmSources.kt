@@ -309,7 +309,7 @@ internal class TrackDecoder(private val ex: MediaExtractor, track: Int) : Closea
     var out = FloatArray(8192); private set
 
     private val codec: MediaCodec = try {
-        if (track < 0) throw IOException("This file has no audio the phone can read")
+        if (track < 0) throw IOException(tr("This file has no audio the phone can read", "このファイルにはスマートフォンで読み取れる音声がありません"))
         ex.selectTrack(track)
         val format = ex.getTrackFormat(track)
         rate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
@@ -374,7 +374,7 @@ internal class TrackDecoder(private val ex: MediaExtractor, track: Int) : Closea
                 if (eos) return -1
                 idle = 0
             } else if (++idle > 2_500) {
-                throw IOException("The audio decoder stopped responding")   // ~10 s without any output
+                throw IOException(tr("The audio decoder stopped responding", "オーディオデコーダーが応答しなくなりました"))   // ~10 s without any output
             }
         }
     }
@@ -534,7 +534,7 @@ internal class DecodedPcm(
                 val n = d.next()
                 if (n < 0) {
                     // Inexact files can come up a few frames short; anything more means the file changed.
-                    if (srcFrames - filled > srcRate / 10) throw IOException("The file ended earlier than expected")
+                    if (srcFrames - filled > srcRate / 10) throw IOException(tr("The file ended earlier than expected", "ファイルが予想より早く終わりました"))
                     break
                 }
                 curOff = 0
@@ -567,7 +567,7 @@ internal class DecodedPcm(
         val wantPts = points.ptsUs[k]
         while (true) {
             val n = d.next()
-            if (n < 0) throw IOException("Seek point not found")
+            if (n < 0) throw IOException(tr("Seek point not found", "シーク位置が見つかりません"))
             if (d.ptsUs < wantPts) continue
             curN = n
             decPos = if (d.ptsUs == wantPts) points.frames[k] else {
@@ -628,7 +628,7 @@ internal class DecodedPcm(
                 for (f in 0 until n) peaks.push(o[f * 2], o[f * 2 + 1])
                 frames += n
             }
-            if (peaks == null) throw IOException("The decoder produced no audio")
+            if (peaks == null) throw IOException(tr("The decoder produced no audio", "デコーダーから音声が出力されませんでした"))
             ScanResult(rate, frames, SeekPoints(pts.toLongArray(), at.toLongArray()), peaks.finish(framesAt48k(frames, rate)))
         }
     }

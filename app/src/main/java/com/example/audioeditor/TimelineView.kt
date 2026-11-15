@@ -327,7 +327,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
             // Only the on-screen part of the clip: a long clip can be hundreds of thousands of pixels wide,
             // more than text layout can handle.
             val textW = min(x1, w) - textX - 6f
-            val name = (if (c.linkId != null) "🔗 " else "") + (src?.name ?: "missing")
+            val name = (if (c.linkId != null) "🔗 " else "") + (src?.name ?: tr("missing", "見つかりません"))
             if (textW > 24f) {
                 drawText(
                     textMeasurer, name, Offset(textX, top + 4f),

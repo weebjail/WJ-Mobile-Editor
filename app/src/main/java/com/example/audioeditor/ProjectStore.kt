@@ -162,7 +162,7 @@ object ProjectStore {
         tmp.writeText(json.toString(2))
         if (!tmp.renameTo(target)) {
             target.delete()
-            if (!tmp.renameTo(target)) throw java.io.IOException("Couldn't save the project")
+            if (!tmp.renameTo(target)) throw java.io.IOException(tr("Couldn't save the project", "プロジェクトを保存できませんでした"))
         }
     }
 

@@ -34,7 +34,7 @@ object Exporters {
     fun writeWav(out: OutputStream, mixer: Mixer) {
         val total = mixer.totalFrames
         val dataSize = total * 6
-        if (dataSize + 36 > 0xFFFFFFFFL) throw IOException("The timeline is too long for a WAV file")
+        if (dataSize + 36 > 0xFFFFFFFFL) throw IOException(tr("The timeline is too long for a WAV file", "タイムラインが長すぎてWAVファイルにできません"))
         val o = BufferedOutputStream(out, 1 shl 16)
         val h = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
         h.put("RIFF".toByteArray(Charsets.US_ASCII)); h.putInt((36 + dataSize).toInt())

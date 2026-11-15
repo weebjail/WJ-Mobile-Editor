@@ -35,7 +35,7 @@ object OtioImport {
     // ---------------------------------------------------------------- Reading the file
 
     fun parse(text: String): OTimeline {
-        val root = MiniJson.parse(text) as? Map<*, *> ?: throw IllegalArgumentException("Not an OTIO file")
+        val root = MiniJson.parse(text) as? Map<*, *> ?: throw IllegalArgumentException(tr("Not an OTIO file", "OTIOファイルではありません"))
         val schema = root.schema()
         // A file may hold a single timeline, or a collection of them (we take the first).
         val timeline = when {
@@ -43,12 +43,12 @@ object OtioImport {
             schema.startsWith("SerializableCollection.") ->
                 (root["children"] as? List<*>)?.filterIsInstance<Map<*, *>>()?.firstOrNull { it.schema().startsWith("Timeline.") }
             else -> null
-        } ?: throw IllegalArgumentException("This file doesn't contain a timeline")
+        } ?: throw IllegalArgumentException(tr("This file doesn't contain a timeline", "このファイルにはタイムラインが含まれていません"))
 
         var rate: Double? = (timeline["global_start_time"] as? Map<*, *>)?.rate()
         var skipped = 0
         val tracks = ArrayList<OTrack>()
-        val stack = timeline["tracks"] as? Map<*, *> ?: throw IllegalArgumentException("The timeline has no tracks")
+        val stack = timeline["tracks"] as? Map<*, *> ?: throw IllegalArgumentException(tr("The timeline has no tracks", "タイムラインにトラックがありません"))
         for (t in (stack["children"] as? List<*>).orEmpty().filterIsInstance<Map<*, *>>()) {
             if (!t.schema().startsWith("Track.")) { skipped++; continue }
             val video = when (t["kind"]) {
@@ -270,19 +270,19 @@ internal object MiniJson {
         p.ws()
         val v = p.value()
         p.ws()
-        if (p.i != s.length) p.fail("Unexpected text after the end")
+        if (p.i != s.length) p.fail(tr("Unexpected text after the end", "末尾の後に余分なテキストがあります"))
         return v
     }
 
     private class Parser(val s: String) {
         var i = 0
 
-        fun fail(msg: String): Nothing = throw IllegalArgumentException("Not a valid OTIO file ($msg at character $i)")
+        fun fail(msg: String): Nothing = throw IllegalArgumentException(tr("Not a valid OTIO file ($msg at character $i)", "有効なOTIOファイルではありません（${i}文字目: $msg）"))
 
         fun ws() { while (i < s.length && s[i].isWhitespace()) i++ }
 
         fun value(): Any? {
-            if (i >= s.length) fail("Unexpected end")
+            if (i >= s.length) fail(tr("Unexpected end", "予期しない終端"))
             return when (val ch = s[i]) {
                 '{' -> obj()
                 '[' -> arr()
@@ -293,12 +293,12 @@ internal object MiniJson {
                 // Python's JSON writer (which OTIO uses) can write these.
                 'N' -> word("NaN", Double.NaN)
                 'I' -> word("Infinity", Double.POSITIVE_INFINITY)
-                else -> if (ch == '-' || ch.isDigit()) num() else fail("Unexpected '$ch'")
+                else -> if (ch == '-' || ch.isDigit()) num() else fail(tr("Unexpected '$ch'", "予期しない文字 '$ch'"))
             }
         }
 
         fun word(w: String, v: Any?): Any? {
-            if (!s.startsWith(w, i)) fail("Unexpected text")
+            if (!s.startsWith(w, i)) fail(tr("Unexpected text", "予期しないテキスト"))
             i += w.length
             return v
         }
@@ -307,25 +307,25 @@ internal object MiniJson {
             val from = i
             if (s.startsWith("-Infinity", i)) { i += 9; return Double.NEGATIVE_INFINITY }
             while (i < s.length && (s[i].isDigit() || s[i] in "+-.eE")) i++
-            return s.substring(from, i).toDoubleOrNull() ?: fail("Bad number")
+            return s.substring(from, i).toDoubleOrNull() ?: fail(tr("Bad number", "不正な数値"))
         }
 
         fun str(): String {
             i++   // opening quote
             val sb = StringBuilder()
             while (true) {
-                if (i >= s.length) fail("Unterminated string")
+                if (i >= s.length) fail(tr("Unterminated string", "文字列が閉じられていません"))
                 val ch = s[i++]
                 when (ch) {
                     '"' -> return sb.toString()
                     '\\' -> {
-                        if (i >= s.length) fail("Unterminated string")
+                        if (i >= s.length) fail(tr("Unterminated string", "文字列が閉じられていません"))
                         when (val e = s[i++]) {
                             'n' -> sb.append('\n'); 't' -> sb.append('\t'); 'r' -> sb.append('\r')
                             'b' -> sb.append('\b'); 'f' -> sb.append('\u000c')
                             'u' -> {
-                                if (i + 4 > s.length) fail("Bad escape")
-                                sb.append(s.substring(i, i + 4).toIntOrNull(16)?.toChar() ?: fail("Bad escape"))
+                                if (i + 4 > s.length) fail(tr("Bad escape", "不正なエスケープ"))
+                                sb.append(s.substring(i, i + 4).toIntOrNull(16)?.toChar() ?: fail(tr("Bad escape", "不正なエスケープ")))
                                 i += 4
                             }
                             else -> sb.append(e)
@@ -343,19 +343,19 @@ internal object MiniJson {
             if (i < s.length && s[i] == '}') { i++; return m }
             while (true) {
                 ws()
-                if (i >= s.length || s[i] != '"') fail("Expected a name")
+                if (i >= s.length || s[i] != '"') fail(tr("Expected a name", "名前が必要です"))
                 val k = str()
                 ws()
-                if (i >= s.length || s[i] != ':') fail("Expected ':'")
+                if (i >= s.length || s[i] != ':') fail(tr("Expected ':'", "':' が必要です"))
                 i++
                 ws()
                 m[k] = value()
                 ws()
-                if (i >= s.length) fail("Unexpected end")
+                if (i >= s.length) fail(tr("Unexpected end", "予期しない終端"))
                 when (s[i++]) {
                     ',' -> continue
                     '}' -> return m
-                    else -> { i--; fail("Expected ',' or '}'") }
+                    else -> { i--; fail(tr("Expected ',' or '}'", "',' または '}' が必要です")) }
                 }
             }
         }
@@ -369,11 +369,11 @@ internal object MiniJson {
                 ws()
                 l += value()
                 ws()
-                if (i >= s.length) fail("Unexpected end")
+                if (i >= s.length) fail(tr("Unexpected end", "予期しない終端"))
                 when (s[i++]) {
                     ',' -> continue
                     ']' -> return l
-                    else -> { i--; fail("Expected ',' or ']'") }
+                    else -> { i--; fail(tr("Expected ',' or ']'", "',' または ']' が必要です")) }
                 }
             }
         }

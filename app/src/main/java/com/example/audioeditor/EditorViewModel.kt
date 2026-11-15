@@ -105,7 +105,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     var snapLine by mutableStateOf<Long?>(null); private set
     var canUndo by mutableStateOf(false); private set
     var canRedo by mutableStateOf(false); private set
-    var projectName by mutableStateOf("Untitled"); private set
+    var projectName by mutableStateOf(tr("Untitled", "無題")); private set
 
     /** Timeline frame rate and resolution, chosen when the project is created (editable in Settings). */
     var frameRate by mutableStateOf(DEFAULT_FRAME_RATE); private set
@@ -240,13 +240,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Decodes files two at a time (cached files load almost instantly). Results keep the input order. */
     private suspend fun decodeAll(items: List<Pair<Uri, Long>>, label: String): List<Result<AudioSource>> {
         val done = AtomicInteger()
-        busy = "$label 0 of ${items.size}…"
+        busy = tr("$label 0 of ${items.size}…", "$label 0 / ${items.size}…")
         val io = Dispatchers.IO.limitedParallelism(2)
         return coroutineScope {
             items.map { (uri, id) ->
                 async(io) {
                     val r = runCatching { AudioDecoder.decode(ctx, uri, id) }
-                    busy = "$label ${done.incrementAndGet()} of ${items.size}…"
+                    val n = done.incrementAndGet()
+                    busy = tr("$label $n of ${items.size}…", "$label $n / ${items.size}…")
                     r
                 }
             }.awaitAll()
@@ -305,11 +306,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun importMedia(uris: List<Uri>, placement: Placement) {
         viewModelScope.launch {
             stop()
-            val results = decodeAll(uris.map { it to newId() }, "Importing")
+            val results = decodeAll(uris.map { it to newId() }, tr("Importing", "読み込み中"))
             val failures = mutableListOf<String>()
             val decoded = results.mapIndexedNotNull { i, r ->
                 r.getOrElse {
-                    failures += "${AudioDecoder.displayName(ctx, uris[i])}: ${it.message ?: "unknown error"}"
+                    failures += "${AudioDecoder.displayName(ctx, uris[i])}: ${it.message ?: tr("unknown error", "不明なエラー")}"
                     null
                 }
             }
@@ -344,8 +345,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val newA = (if (needCam) 1 else 0) + (if (needRec) 1 else 0)
                 if ((needV && vTracks >= MAX_VIDEO_TRACKS) || tracks + newA > MAX_AUDIO_TRACKS) {
                     busy = null
-                    message = "There's no room for new tracks (at most $MAX_VIDEO_TRACKS video and $MAX_AUDIO_TRACKS " +
-                        "audio tracks). Import again and put the files at the playhead or the end instead."
+                    message = tr(
+                        "There's no room for new tracks (at most $MAX_VIDEO_TRACKS video and $MAX_AUDIO_TRACKS " +
+                            "audio tracks). Import again and put the files at the playhead or the end instead.",
+                        "新しいトラックを追加できません（ビデオは最大$MAX_VIDEO_TRACKS、オーディオは最大${MAX_AUDIO_TRACKS}トラック）。" +
+                            "もう一度読み込んで、再生ヘッドの位置か末尾に配置してください。",
+                    )
                     return@launch
                 }
                 videoTrack = if (needV) vTracks++ else 0
@@ -395,10 +400,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val mismatched = newSources.values.mapNotNull { s -> s.video?.let { FrameRate.closestTo(it.fps) } }
                 .filter { it != frameRate }.distinct()
             message = listOfNotNull(
-                failures.takeIf { it.isNotEmpty() }?.let { "Couldn't import: " + it.joinToString("; ") },
+                failures.takeIf { it.isNotEmpty() }?.let { tr("Couldn't import: ", "読み込めませんでした: ") + it.joinToString("; ") },
                 mismatched.takeIf { it.isNotEmpty() }?.let { r ->
-                    "Video is ${r.joinToString(" / ") { it.label }} fps but the timeline is ${frameRate.label} fps. " +
-                        "You can change the timeline in Settings."
+                    val rates = r.joinToString(" / ") { it.label }
+                    tr(
+                        "Video is $rates fps but the timeline is ${frameRate.label} fps. You can change the timeline in Settings.",
+                        "ビデオは $rates fps ですが、タイムラインは ${frameRate.label} fps です。タイムラインは設定で変更できます。",
+                    )
                 },
             ).joinToString("\n").ifEmpty { null }
         }
@@ -415,22 +423,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun importTimeline(uri: Uri) {
         stop()
         viewModelScope.launch {
-            busy = "Reading timeline…"
+            busy = tr("Reading timeline…", "タイムラインを読み込み中…")
             try {
                 val otio = withContext(Dispatchers.IO) {
                     val text = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
-                        ?: throw IOException("Couldn't open the file")
+                        ?: throw IOException(tr("Couldn't open the file", "ファイルを開けませんでした"))
                     OtioImport.parse(text)
                 }
                 if (otio.clipCount == 0) {
-                    message = "“${otio.name}” has no clips that can be imported"
+                    message = tr("“${otio.name}” has no clips that can be imported", "「${otio.name}」には読み込めるクリップがありません")
                     return@launch
                 }
                 val known = sources.values.map { it.name.lowercase() }.toSet()
                 val missing = otio.mediaNames.filter { it.lowercase() !in known }
                 if (missing.isEmpty()) timelineReady(otio, emptyMap()) else otioMedia = OtioMedia(otio, missing, emptyMap())
             } catch (e: Exception) {
-                message = "Couldn't read the timeline: ${e.message}"
+                message = tr("Couldn't read the timeline: ", "タイムラインを読み込めませんでした: ") + e.message
             } finally {
                 busy = null
             }
@@ -452,7 +460,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 otioMedia = OtioMedia(req.otio, still, found)
                 val unused = uris.size - matched.size
-                if (unused > 0) message = "$unused of the chosen files ${if (unused == 1) "isn't" else "aren't"} used by this timeline"
+                if (unused > 0) message = tr(
+                    "$unused of the chosen files ${if (unused == 1) "isn't" else "aren't"} used by this timeline",
+                    "選択したファイルのうち${unused}個はこのタイムラインで使われていません",
+                )
             }
         }
     }
@@ -479,12 +490,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             stop()
             val wasEmpty = clips.isEmpty()
             val entries = files.entries.toList()
-            val results = decodeAll(entries.map { it.value to newId() }, "Importing media")
+            val results = decodeAll(entries.map { it.value to newId() }, tr("Importing media", "メディアを読み込み中"))
             val failures = mutableListOf<String>()
             val newSources = LinkedHashMap<Long, AudioSource>()
             for ((i, r) in results.withIndex()) {
                 r.onSuccess { newSources[it.id] = it }
-                    .onFailure { failures += "${entries[i].key}: ${it.message ?: "unknown error"}" }
+                    .onFailure { failures += "${entries[i].key}: ${it.message ?: tr("unknown error", "不明なエラー")}" }
             }
             // Media already in the project first, then the newly picked files (matched by their timeline name).
             val media = HashMap<String, OtioImport.Media>()
@@ -505,19 +516,31 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             busy = null
             val needV = maxOf(videoTrackCount, vBase + r.videoTracksUsed)
             val needA = maxOf(trackCount, aBase + r.audioTracksUsed)
-            val failed = failures.takeIf { it.isNotEmpty() }?.let { "\nCouldn't open: " + it.joinToString("; ") } ?: ""
+            val failed = failures.takeIf { it.isNotEmpty() }
+                ?.let { tr("\nCouldn't open: ", "\n開けませんでした: ") + it.joinToString("; ") } ?: ""
             when {
                 r.clips.isEmpty() -> {
-                    message = "None of the clips in “${otio.name}” could be imported. Check the media files.$failed"
+                    message = tr(
+                        "None of the clips in “${otio.name}” could be imported. Check the media files.",
+                        "「${otio.name}」のクリップを1つも読み込めませんでした。メディアファイルを確認してください。",
+                    ) + failed
                     return@launch
                 }
                 needV > MAX_VIDEO_TRACKS || needA > MAX_AUDIO_TRACKS -> {
-                    message = "That needs $needV video and $needA audio tracks, but the most is $MAX_VIDEO_TRACKS video " +
-                        "and $MAX_AUDIO_TRACKS audio." + if (newTracks) " Try putting it at the playhead or the end instead." else ""
+                    message = tr(
+                        "That needs $needV video and $needA audio tracks, but the most is $MAX_VIDEO_TRACKS video " +
+                            "and $MAX_AUDIO_TRACKS audio." + if (newTracks) " Try putting it at the playhead or the end instead." else "",
+                        "ビデオ${needV}トラックとオーディオ${needA}トラックが必要ですが、最大はビデオ$MAX_VIDEO_TRACKS、" +
+                            "オーディオ${MAX_AUDIO_TRACKS}トラックです。" +
+                            if (newTracks) "再生ヘッドの位置か末尾に配置してみてください。" else "",
+                    )
                     return@launch
                 }
                 !newTracks && r.clips.any { isLocked(it.video, it.track) } -> {
-                    message = "Some of the tracks the timeline goes on are locked. Unlock them, or put it on new tracks."
+                    message = tr(
+                        "Some of the tracks the timeline goes on are locked. Unlock them, or put it on new tracks.",
+                        "配置先のトラックの一部がロックされています。ロックを解除するか、新しいトラックに配置してください。",
+                    )
                     return@launch
                 }
             }
@@ -529,17 +552,26 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val otioRate = otio.rate?.let { FrameRate.closestTo(it) }
             if (wasEmpty) {
                 otioRate?.let { frameRate = it }
-                if (savedName == null && projectName == "Untitled") projectName = ProjectStore.safeName(otio.name)
+                if (savedName == null && projectName in UNTITLED_NAMES) projectName = ProjectStore.safeName(otio.name)
             }
             applyClips(overwrite(clips, r.clips))
             loadThumbnails(newSources.values)
             revealPlayhead()
             val left = otio.skipped + r.skipped
             message = buildString {
-                append("Imported “${otio.name}”: ${r.clips.size} clip${if (r.clips.size == 1) "" else "s"}")
-                if (left > 0) append(". $left item${if (left == 1) "" else "s"} left out (missing media, titles, effects or compound clips)")
+                append(tr(
+                    "Imported “${otio.name}”: ${r.clips.size} clip${if (r.clips.size == 1) "" else "s"}",
+                    "「${otio.name}」を読み込みました: クリップ${r.clips.size}個",
+                ))
+                if (left > 0) append(tr(
+                    ". $left item${if (left == 1) "" else "s"} left out (missing media, titles, effects or compound clips)",
+                    "。${left}個の項目は除外されました（見つからないメディア、タイトル、エフェクト、複合クリップ）",
+                ))
                 if (!wasEmpty && otioRate != null && otioRate != frameRate) {
-                    append(". It was ${otioRate.label} fps; this project is ${frameRate.label} fps")
+                    append(tr(
+                        ". It was ${otioRate.label} fps; this project is ${frameRate.label} fps",
+                        "。元は ${otioRate.label} fps、このプロジェクトは ${frameRate.label} fps です",
+                    ))
                 }
                 append(failed)
             }
@@ -567,9 +599,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val (name, lut) = withContext(Dispatchers.IO) { LutLibrary.import(ctx, uri) }
                 luts = luts + (name to lut)
                 gradeTarget?.let { changeGrade(it.id, it.grade.copy(lut = name)) }
-                message = "LUT “$name” loaded"
+                message = tr("LUT “$name” loaded", "LUT「$name」を読み込みました")
             } catch (e: Exception) {
-                message = "Couldn't load the LUT: ${e.message}"
+                message = tr("Couldn't load the LUT: ", "LUTを読み込めませんでした: ") + e.message
             }
         }
     }
@@ -603,13 +635,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun copyGrade(from: Clip, all: Boolean) {
         val targets = clips.filter { it.video && it.id != from.id && (all || it.sourceId == from.sourceId) && isEditable(it) }
         if (targets.isEmpty()) {
-            message = if (all) "There are no other video clips" else "There are no other clips from this file"
+            message = if (all) tr("There are no other video clips", "他にビデオクリップはありません")
+            else tr("There are no other clips from this file", "このファイルの他のクリップはありません")
             return
         }
         pushUndo()
         val ids = targets.map { it.id }.toSet()
         applyClips(clips.map { if (it.id in ids) it.copy(grade = from.grade) else it })
-        message = "Grade copied to ${targets.size} clip${if (targets.size == 1) "" else "s"}"
+        message = tr(
+            "Grade copied to ${targets.size} clip${if (targets.size == 1) "" else "s"}",
+            "カラーを${targets.size}個のクリップにコピーしました",
+        )
     }
 
     private fun loadThumbnails(list: Collection<AudioSource>) {
@@ -629,7 +665,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun play() {
-        if (clips.isEmpty()) { message = "Import some media first"; return }
+        if (clips.isEmpty()) { message = tr("Import some media first", "先にメディアを読み込んでください"); return }
         if (playhead >= totalFrames) playhead = 0
         player.play(playhead, mixer())
         isPlaying = true
@@ -696,7 +732,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val sel = selectedClip
         val targets = if (sel != null && inside(sel)) group(sel).filter(::inside)
         else clips.filter { inside(it) && isEditable(it) }
-        if (targets.isEmpty()) { message = "Move the playhead over a clip to cut it"; return }
+        if (targets.isEmpty()) { message = tr("Move the playhead over a clip to cut it", "カットするには再生ヘッドをクリップの上に移動してください"); return }
         var new = clips
         for (t in targets) new = TimelineOps.split(new, t, playhead, ::newId)
         // The right-hand pieces of a linked video + audio become their own linked pair.
@@ -736,9 +772,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun rippleTrimEdit(atStart: Boolean) {
-        val t = selectedClip ?: run { message = "Move the playhead over a clip first"; return }
+        val t = selectedClip ?: run { message = tr("Move the playhead over a clip first", "先に再生ヘッドをクリップの上に移動してください"); return }
         val members = group(t).filter(::inside)
-        if (members.isEmpty()) { message = "Move the playhead inside the clip to trim it"; return }
+        if (members.isEmpty()) { message = tr("Move the playhead inside the clip to trim it", "トリムするには再生ヘッドをクリップの内側に移動してください"); return }
         if (rippleAllTracks) {
             // Remove that stretch of time from every track.
             val from = if (atStart) members.minOf { it.start } else playhead
@@ -763,7 +799,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun rippleTrimEnd() = rippleTrim(atStart = false)
 
     fun deleteSelected(ripple: Boolean) {
-        val sel = selectedClip ?: run { message = "Tap a clip to select it first"; return }
+        val sel = selectedClip ?: run { message = tr("Tap a clip to select it first", "先にクリップをタップして選択してください"); return }
         stop()
         val members = group(sel)
         if (ripple && rippleAllTracks) {
@@ -782,7 +818,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun crossfade() {
         stop()
-        val t = fadeTarget ?: run { message = "Select or move the playhead over an audio clip to crossfade"; return }
+        val t = fadeTarget ?: run { message = tr(
+            "Select or move the playhead over an audio clip to crossfade",
+            "クロスフェードするには、オーディオクリップを選択するか再生ヘッドをその上に移動してください",
+        ); return }
         val duration = (crossfadeSeconds * SAMPLE_RATE).toLong()
         val result = TimelineOps.crossfade(clips, t, playhead, duration, defaultCurve) { id ->
             sources[id]?.let { it.pcm?.frames ?: it.frames } ?: 0L
@@ -790,19 +829,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         when (result) {
             is TimelineOps.CrossfadeResult.Done -> commit(result.clips)
             TimelineOps.CrossfadeResult.NoHandles -> message =
-                "There's no extra audio beyond this cut to blend. Trim the end of the first clip or the " +
-                    "start of the second a little, then try again."
+                tr(
+                    "There's no extra audio beyond this cut to blend. Trim the end of the first clip or the " +
+                        "start of the second a little, then try again.",
+                    "このカットの前後に重ねるための余分な音声がありません。1つ目のクリップの終わりか" +
+                        "2つ目のクリップの始まりを少しトリムしてから、もう一度試してください。",
+                )
         }
     }
 
     fun addAudioTrack() {
-        if (trackCount >= MAX_AUDIO_TRACKS) { message = "$MAX_AUDIO_TRACKS audio tracks is the maximum"; return }
+        if (trackCount >= MAX_AUDIO_TRACKS) { message = tr("$MAX_AUDIO_TRACKS audio tracks is the maximum", "オーディオトラックは最大${MAX_AUDIO_TRACKS}本です"); return }
         pushUndo()
         trackCount++
     }
 
     fun addVideoTrack() {
-        if (videoTrackCount >= MAX_VIDEO_TRACKS) { message = "$MAX_VIDEO_TRACKS video tracks is the maximum"; return }
+        if (videoTrackCount >= MAX_VIDEO_TRACKS) { message = tr("$MAX_VIDEO_TRACKS video tracks is the maximum", "ビデオトラックは最大${MAX_VIDEO_TRACKS}本です"); return }
         pushUndo()
         videoTrackCount++
     }
@@ -953,12 +996,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         // Videos on locked tracks stay where they are. (Recorder audio on a locked track can still be matched.)
         val groups = allGroups.filter { (_, g) -> isEditable(g.first()) }
         val recorders = clips.filter { !it.video && it.linkId == null && sources[it.sourceId]?.pcm != null }
-        if (allGroups.isEmpty()) { message = "Import a video file with sound first"; return }
-        if (groups.isEmpty()) { message = "Those videos are on locked tracks. Unlock them to sync."; return }
-        if (recorders.isEmpty()) { message = "Import the recorder's audio file first"; return }
+        if (allGroups.isEmpty()) { message = tr("Import a video file with sound first", "先に音声付きのビデオファイルを読み込んでください"); return }
+        if (groups.isEmpty()) {
+            message = tr("Those videos are on locked tracks. Unlock them to sync.", "それらのビデオはロックされたトラックにあります。同期するにはロックを解除してください。")
+            return
+        }
+        if (recorders.isEmpty()) { message = tr("Import the recorder's audio file first", "先にレコーダーの音声ファイルを読み込んでください"); return }
 
         viewModelScope.launch {
-            busy = "Matching waveforms…"
+            busy = tr("Matching waveforms…", "波形を照合中…")
             val srcs = sources
             val matches = withContext(Dispatchers.Default) {
                 val recEnv = recorders.associate { r -> r.id to AudioSync.envelope(srcs[r.sourceId]!!.pcm!!, r.sourceIn, r.length) }
@@ -980,13 +1026,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val problems = mutableListOf<String>()
             var synced = 0
             for ((link, cam, best) in matches) {
-                val name = srcs[cam.sourceId]?.name ?: "clip"
-                if (best == null) { problems += "$name (no match found)"; continue }
+                val name = srcs[cam.sourceId]?.name ?: tr("clip", "クリップ")
+                if (best == null) { problems += name + tr(" (no match found)", "（一致なし）"); continue }
                 val (rec, m) = best
                 val g = new.filter { it.linkId == link }
                 val ids = g.map { it.id }.toSet()
                 val delta = rec.start + m.lagFrames - cam.start
-                if (g.any { it.start + delta < 0 }) { problems += "$name (would start before 0:00)"; continue }
+                if (g.any { it.start + delta < 0 }) { problems += name + tr(" (would start before 0:00)", "（0:00より前に始まってしまう）"); continue }
                 val placed = g.map { it.copy(start = it.start + delta) }.map { c ->
                     val count = if (c.video) vTracks else aTracks
                     var track = (listOf(c.track) + (0 until count)).firstOrNull {
@@ -996,7 +1042,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     if (track == null && !c.video && aTracks < MAX_AUDIO_TRACKS) track = aTracks++
                     track?.let { c.copy(track = it) }
                 }
-                if (placed.any { it == null }) { problems += "$name (no free track)"; continue }
+                if (placed.any { it == null }) { problems += name + tr(" (no free track)", "（空きトラックなし）"); continue }
                 new = new.filter { it.id !in ids } + placed.filterNotNull()
                 synced++
             }
@@ -1008,9 +1054,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             busy = null
             message = buildString {
-                append("Synced $synced of ${matches.size} video clip${if (matches.size == 1) "" else "s"}")
-                if (problems.isNotEmpty()) append(". Not synced: ").append(problems.joinToString("; "))
-                if (synced > 0) append(". Mute the camera audio track if you only want the recorder.")
+                append(tr(
+                    "Synced $synced of ${matches.size} video clip${if (matches.size == 1) "" else "s"}",
+                    "ビデオクリップ${matches.size}個中${synced}個を同期しました",
+                ))
+                if (problems.isNotEmpty()) append(tr(". Not synced: ", "。同期できなかったもの: ")).append(problems.joinToString("; "))
+                if (synced > 0) append(tr(
+                    ". Mute the camera audio track if you only want the recorder.",
+                    "。レコーダーの音声だけを使う場合は、カメラ音声のトラックをミュートしてください。",
+                ))
             }
         }
     }
@@ -1058,9 +1110,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             projectName = safe
             savedName = safe
             dirty = false
-            message = "Project '$safe' saved"
+            message = tr("Project '$safe' saved", "プロジェクト「$safe」を保存しました")
         } catch (e: Exception) {
-            message = "Couldn't save: ${e.message}"
+            message = tr("Couldn't save: ", "保存できませんでした: ") + e.message
         }
     }
 
@@ -1081,11 +1133,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun loadProject(name: String) {
         stop()
         viewModelScope.launch {
-            busy = "Loading project '$name'…"
+            busy = tr("Loading project '$name'…", "プロジェクト「$name」を読み込み中…")
             try {
                 val data = withContext(Dispatchers.IO) { ProjectStore.load(ctx, name) }
-                    ?: throw IOException("Project not found")
-                val results = decodeAll(data.sources.map { Uri.parse(it.uriString) to it.id }, "Loading media")
+                    ?: throw IOException(tr("Project not found", "プロジェクトが見つかりません"))
+                val results = decodeAll(data.sources.map { Uri.parse(it.uriString) to it.id }, tr("Loading media", "メディアを読み込み中"))
                 val loaded = results.mapNotNull { it.getOrNull() }.associateBy { it.id }
                 val missing = data.sources.filter { it.id !in loaded }.map { it.name }
 
@@ -1133,11 +1185,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 dirty = false
                 ProjectStore.markOpened(ctx, name)
                 loadThumbnails(loaded.values)
-                message = if (missing.isEmpty()) "Loaded '${data.name}'"
-                else "Loaded '${data.name}', but couldn't open: ${missing.joinToString(", ")}. " +
-                    "Those clips will be silent."
+                message = if (missing.isEmpty()) tr("Loaded '${data.name}'", "「${data.name}」を読み込みました")
+                else tr(
+                    "Loaded '${data.name}', but couldn't open: ${missing.joinToString(", ")}. Those clips will be silent.",
+                    "「${data.name}」を読み込みましたが、次のファイルを開けませんでした: ${missing.joinToString("、")}。" +
+                        "それらのクリップは無音になります。",
+                )
             } catch (e: Exception) {
-                message = "Failed to load project: ${e.message}"
+                message = tr("Failed to load project: ", "プロジェクトを読み込めませんでした: ") + e.message
             } finally {
                 busy = null
             }
@@ -1164,7 +1219,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         projectName = ProjectStore.safeName(name)
         savedName = null
         dirty = false
-        message = "New project started (${rate.label} fps, ${width}×$height)"
+        message = tr("New project started", "新しいプロジェクトを開始しました") + " (${rate.label} fps, ${width}×$height)"
     }
 
     /** Saved projects with when they were last opened and the size of their media. Slow-ish: call off the main thread. */
@@ -1178,24 +1233,27 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------ Export
 
     fun exportWav(uri: Uri) {
-        if (clips.isEmpty()) { message = "Nothing to export yet"; return }
+        if (clips.isEmpty()) { message = tr("Nothing to export yet", "書き出すものがまだありません"); return }
         stop()
         val mixer = mixer()
         val used = sources.values.filter { s -> clips.any { !it.video && it.sourceId == s.id } }
         val errorsBefore = used.associateWith { it.pcm?.readErrors ?: 0 }
         viewModelScope.launch {
-            busy = "Exporting audio…"
+            busy = tr("Exporting audio…", "オーディオを書き出し中…")
             try {
                 withContext(Dispatchers.IO) {
-                    val out = ctx.contentResolver.openOutputStream(uri) ?: throw IOException("Couldn't open the file")
+                    val out = ctx.contentResolver.openOutputStream(uri) ?: throw IOException(tr("Couldn't open the file", "ファイルを開けませんでした"))
                     out.use { Exporters.writeWav(it, mixer) }
                 }
                 // Audio is read from the original files; say so if any of them couldn't be read in full.
                 val unreadable = used.filter { (it.pcm?.readErrors ?: 0) > errorsBefore.getValue(it) }
-                message = if (unreadable.isEmpty()) "Audio exported"
-                else "Exported, but parts of ${unreadable.joinToString { it.name }} couldn't be read and are silent"
+                message = if (unreadable.isEmpty()) tr("Audio exported", "オーディオを書き出しました")
+                else tr(
+                    "Exported, but parts of ${unreadable.joinToString { it.name }} couldn't be read and are silent",
+                    "書き出しましたが、${unreadable.joinToString("、") { it.name }}の一部を読み込めなかったため無音になっています",
+                )
             } catch (e: Exception) {
-                message = "Export failed: ${e.message}"
+                message = tr("Export failed: ", "書き出しに失敗しました: ") + e.message
             } finally {
                 busy = null
             }
@@ -1216,7 +1274,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Writes the Resolve timeline to [uri] as FCP7 XML, or OpenTimelineIO when [otio]. The media stays where it is. */
     fun exportResolve(uri: Uri, name: String, otio: Boolean) {
-        if (clips.isEmpty()) { message = "Nothing to export yet"; return }
+        if (clips.isEmpty()) { message = tr("Nothing to export yet", "書き出すものがまだありません"); return }
         stop()
         val rate = frameRate
         val folder = resolveMediaFolder
@@ -1225,18 +1283,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             lockedAudio, lockedVideo,
         )
         viewModelScope.launch {
-            busy = "Saving Resolve timeline…"
+            busy = tr("Saving Resolve timeline…", "Resolve用タイムラインを保存中…")
             try {
                 withContext(Dispatchers.IO) {
-                    val out = ctx.contentResolver.openOutputStream(uri, "wt") ?: throw IOException("Couldn't open the file")
+                    val out = ctx.contentResolver.openOutputStream(uri, "wt") ?: throw IOException(tr("Couldn't open the file", "ファイルを開けませんでした"))
                     out.use {
                         if (otio) Exporters.writeResolveOtio(it, timeline, rate, folder)
                         else Exporters.writeResolveXml(it, timeline, rate, folder)
                     }
                 }
-                message = "Timeline saved. In Resolve: File > Import > Timeline"
+                message = tr(
+                    "Timeline saved. In Resolve: File > Import > Timeline",
+                    "タイムラインを保存しました。Resolveで「ファイル > 読み込み > タイムライン」を選んでください",
+                )
             } catch (e: Exception) {
-                message = "Export failed: ${e.message}"
+                message = tr("Export failed: ", "書き出しに失敗しました: ") + e.message
             } finally {
                 busy = null
             }
@@ -1254,6 +1315,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_RIPPLE_ALL = "rippleAllTracks"
         const val KEY_RESOLVE_FOLDER = "resolveMediaFolder"
         const val AUTOSAVE_NAME = "Autosave"
+        val UNTITLED_NAMES = setOf("Untitled", "無題")
 
         /** Older projects called the curved fade "EXPONENTIAL". */
         fun parseCurve(s: String) = if (s == FadeCurve.LINEAR.name) FadeCurve.LINEAR else FadeCurve.CURVED

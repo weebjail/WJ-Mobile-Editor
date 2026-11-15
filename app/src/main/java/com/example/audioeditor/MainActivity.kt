@@ -16,6 +16,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        I18n.load(this)
         setContent {
             AudioEditorTheme {
                 Surface(Modifier.fillMaxSize()) {
