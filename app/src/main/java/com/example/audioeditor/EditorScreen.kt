@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -259,7 +260,7 @@ fun EditorScreen(vm: EditorViewModel) {
                     )
                 }
                 Labeled(tr("Add marker (press again on a marker to edit it)", "マーカーを追加（マーカー上でもう一度押すと編集）")) {
-                    IconButton(onClick = vm::markerButton, modifier = Modifier.visibleWidth(14.dp).size(44.dp)) {
+                    IconButton(onClick = vm::markerButton, modifier = Modifier.offset(x = (-4).dp).visibleWidth(14.dp).size(44.dp)) {
                         Icon(
                             Icons.Default.Bookmark,
                             contentDescription = tr("Marker", "マーカー"),
