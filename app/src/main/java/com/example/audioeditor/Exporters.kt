@@ -80,6 +80,7 @@ object Exporters {
         val height: Int,
         val lockedAudio: Set<Int> = emptySet(),
         val lockedVideo: Set<Int> = emptySet(),
+        val markers: List<Marker> = emptyList(),
     )
 
     /**
@@ -332,8 +333,14 @@ object Exporters {
         for (a in 0 until t.audioTracks) {
             tracks += track("A${a + 1}", "Audio", t.clips.filter { !it.video && it.track == a }, false, a !in t.mutedTracks)
         }
+        // Timeline markers sit on the stack, one frame long, as Resolve writes them.
+        val markers = t.markers.sortedBy { it.frame }.joinToString(",\n") { m ->
+            """{"OTIO_SCHEMA": "Marker.2", "name": ${js(m.name)}, "color": "${m.color.otio}", "comment": ${js(m.note)}, """ +
+                """"marked_range": ${range(rate.toFrames(m.frame), 1)}, """ +
+                """"metadata": {"Resolve_OTIO": {"Color": ${js(m.color.en)}, "Keywords": [], "Note": ${js(m.note)}}}}"""
+        }
         return """{"OTIO_SCHEMA": "Timeline.1", "name": ${js(t.name)}, "global_start_time": ${time(0)}, "metadata": {}, """ +
-            """"tracks": {"OTIO_SCHEMA": "Stack.1", "name": "tracks", "source_range": null, "effects": [], "markers": [], """ +
+            """"tracks": {"OTIO_SCHEMA": "Stack.1", "name": "tracks", "source_range": null, "effects": [], "markers": [$markers], """ +
             """"metadata": {}, "children": [""" + tracks.joinToString(",\n") + "]}}\n"
     }
 }

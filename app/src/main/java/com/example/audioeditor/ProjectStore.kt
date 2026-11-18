@@ -41,7 +41,11 @@ data class ProjectData(
     val frameRate: String? = null,
     val width: Int? = null,
     val height: Int? = null,
+    val markers: List<Marker> = emptyList(),
 )
+
+/** Where the user was in a project: playhead, scroll and zoom. Kept apart from the project so it never makes it "changed". */
+data class ViewState(val playhead: Long, val scrollFrames: Double, val samplesPerPx: Double)
 
 object ProjectStore {
     private fun dir(context: Context): File = File(context.filesDir, "projects").apply { mkdirs() }
@@ -155,6 +159,16 @@ object ProjectStore {
                 })
             }
             put("clips", clipsArray)
+
+            put("markers", JSONArray().apply {
+                for (m in data.markers) put(JSONObject().apply {
+                    put("id", m.id)
+                    put("frame", m.frame)
+                    put("color", m.color.name)
+                    put("name", m.name)
+                    put("note", m.note)
+                })
+            })
         }
         // Write to a temp file first so a crash mid-save can't destroy the previous version.
         val target = file(context, data.name)
@@ -219,8 +233,22 @@ object ProjectStore {
                 } ?: Grade(),
             )
         }
+        val markers = mutableListOf<Marker>()
+        json.optJSONArray("markers")?.let { a ->
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i)
+                markers += Marker(
+                    id = o.getLong("id"),
+                    frame = o.getLong("frame").coerceAtLeast(0L),
+                    color = MarkerColor.entries.find { it.name == o.optString("color") } ?: MarkerColor.BLUE,
+                    name = o.optString("name", ""),
+                    note = o.optString("note", ""),
+                )
+            }
+        }
         return ProjectData(
             name, trackCount, playhead, sourcesList, clipsList, videoTrackCount, muted,
+            markers = markers,
             lockedAudio = intSet("lockedAudio"),
             lockedVideo = intSet("lockedVideo"),
             frameRate = if (json.has("frameRate")) json.getString("frameRate") else null,
@@ -232,5 +260,19 @@ object ProjectStore {
     fun delete(context: Context, projectName: String) {
         file(context, projectName).delete()
         openedTimes(context).edit().remove(safeName(projectName)).apply()
+        views(context).edit().remove(safeName(projectName)).apply()
+    }
+
+    // ---------------------------------------------------------------- Last position in each project
+
+    private fun views(context: Context) = context.getSharedPreferences("project_view", Context.MODE_PRIVATE)
+
+    fun saveView(context: Context, name: String, v: ViewState) {
+        views(context).edit().putString(safeName(name), "${v.playhead},${v.scrollFrames},${v.samplesPerPx}").apply()
+    }
+
+    fun loadView(context: Context, name: String): ViewState? {
+        val parts = views(context).getString(safeName(name), null)?.split(',') ?: return null
+        return runCatching { ViewState(parts[0].toLong(), parts[1].toDouble(), parts[2].toDouble()) }.getOrNull()
     }
 }

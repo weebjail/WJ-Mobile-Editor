@@ -13,6 +13,9 @@ const val PEAK_BLOCK = 256
 const val MAX_AUDIO_TRACKS = 8
 const val MAX_VIDEO_TRACKS = 4
 
+/** Longest fade or crossfade the sliders set (Resolve-style transitions rarely need more). */
+const val MAX_FADE_SECONDS = 5L
+
 /** Timeline format for new projects (and older projects saved before it was stored). */
 val DEFAULT_FRAME_RATE = FrameRate.F29_97
 const val DEFAULT_WIDTH = 1920
@@ -106,6 +109,40 @@ fun Clip.withValidFades(): Clip {
     val fo = fadeOut.frames.coerceIn(0L, length - fi)
     return copy(fadeIn = fadeIn.copy(frames = fi), fadeOut = fadeOut.copy(frames = fo))
 }
+
+/**
+ * DaVinci Resolve's marker colours, in its own order. [otio] is the nearest OpenTimelineIO marker colour, which is
+ * what Resolve reads and writes in .otio files.
+ */
+enum class MarkerColor(val argb: Long, val en: String, val ja: String, val otio: String) {
+    BLUE(0xFF2D8CEB, "Blue", "ブルー", "BLUE"),
+    CYAN(0xFF2EC4D6, "Cyan", "シアン", "CYAN"),
+    GREEN(0xFF3BB54A, "Green", "グリーン", "GREEN"),
+    YELLOW(0xFFF2C94C, "Yellow", "イエロー", "YELLOW"),
+    RED(0xFFE5483B, "Red", "レッド", "RED"),
+    PINK(0xFFF07BB6, "Pink", "ピンク", "PINK"),
+    PURPLE(0xFF9B59D0, "Purple", "パープル", "PURPLE"),
+    FUCHSIA(0xFFD0359B, "Fuchsia", "フクシア", "MAGENTA"),
+    ROSE(0xFFE8A0A8, "Rose", "ローズ", "PINK"),
+    LAVENDER(0xFFB9A6E0, "Lavender", "ラベンダー", "PURPLE"),
+    SKY(0xFF8FD3F4, "Sky", "スカイ", "CYAN"),
+    MINT(0xFF8EE0B5, "Mint", "ミント", "GREEN"),
+    LEMON(0xFFEFEB7A, "Lemon", "レモン", "YELLOW"),
+    SAND(0xFFD9B98C, "Sand", "サンド", "ORANGE"),
+    COCOA(0xFF8A5A3C, "Cocoa", "ココア", "ORANGE"),
+    CREAM(0xFFF4EBD2, "Cream", "クリーム", "WHITE");
+
+    val label: String get() = tr(en, ja)
+}
+
+/** A timeline marker, like Resolve's: a coloured flag at one point, with an optional name and note. */
+data class Marker(
+    val id: Long,
+    val frame: Long,
+    val color: MarkerColor = MarkerColor.BLUE,
+    val name: String = "",
+    val note: String = "",
+)
 
 fun formatTime(frames: Long): String {
     val totalCs = frames * 100 / SAMPLE_RATE

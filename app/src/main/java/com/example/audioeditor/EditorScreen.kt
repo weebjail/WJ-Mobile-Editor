@@ -3,9 +3,11 @@
 package com.example.audioeditor
 
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -20,14 +22,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardTab
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -47,6 +52,8 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.SaveAs
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.ZoomIn
@@ -101,7 +108,7 @@ import kotlin.math.roundToLong
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-private enum class Dialog { NONE, SAVE, LOAD, RESOLVE, SETTINGS, CONFIRM_NEW, NEW_PROJECT }
+private enum class Dialog { NONE, SAVE, RESOLVE, SETTINGS, CONFIRM_NEW, NEW_PROJECT }
 
 /** Quick resolution choices (landscape; the Vertical box swaps width and height). */
 private val ResolutionPresets = listOf(
@@ -115,7 +122,6 @@ fun EditorScreen(vm: EditorViewModel) {
     var dialog by remember { mutableStateOf(Dialog.NONE) }
 
     var exportName by remember { mutableStateOf("") }
-    var exportOtio by remember { mutableStateOf(false) }   // Resolve export as OpenTimelineIO instead of XML
 
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
         if (it.isNotEmpty()) vm.importFiles(it)
@@ -123,12 +129,9 @@ fun EditorScreen(vm: EditorViewModel) {
     val wavLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("audio/wav")) {
         it?.let(vm::exportWav)
     }
-    val xmlLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/xml")) { uri ->
-        uri?.let { vm.exportResolve(it, exportName.ifBlank { vm.projectName }, otio = false) }
-    }
     // .otio has no standard MIME type; a generic one keeps the file name exactly as given.
     val otioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
-        uri?.let { vm.exportResolve(it, exportName.ifBlank { vm.projectName }, otio = true) }
+        uri?.let { vm.exportResolve(it, exportName.ifBlank { vm.projectName }) }
     }
     // .otio and .cube files have no standard MIME type, so any file can be picked.
     val timelineLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
@@ -159,7 +162,9 @@ fun EditorScreen(vm: EditorViewModel) {
     }
 
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
-        Column(Modifier.fillMaxSize()) {
+        // The app opens on the project list; the Project menu comes back to it.
+        if (vm.showProjects) ProjectScreen(vm) { dialog = if (vm.dirty) Dialog.CONFIRM_NEW else Dialog.NEW_PROJECT }
+        else Column(Modifier.fillMaxSize()) {
             // TOP BAR: media, project, tracks, sync, export, settings
             ToolRow(scrollable = true) {
                 IconBtn(Icons.Default.LibraryAdd, tr("Import audio or video", "オーディオ・ビデオを読み込む")) {
@@ -169,8 +174,17 @@ fun EditorScreen(vm: EditorViewModel) {
                     DropdownMenuItem(text = { Text(tr("New project", "新規プロジェクト")) }, onClick = {
                         close(); dialog = if (vm.dirty) Dialog.CONFIRM_NEW else Dialog.NEW_PROJECT
                     })
-                    DropdownMenuItem(text = { Text(tr("Save project…", "プロジェクトを保存…")) }, onClick = { close(); dialog = Dialog.SAVE })
-                    DropdownMenuItem(text = { Text(tr("Open project…", "プロジェクトを開く…")) }, onClick = { close(); dialog = Dialog.LOAD })
+                    DropdownMenuItem(
+                        text = { Text(tr("Save", "保存")) },
+                        leadingIcon = { Icon(Icons.Default.Save, contentDescription = null) },
+                        onClick = { close(); if (!vm.save()) dialog = Dialog.SAVE },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(tr("Save as…", "名前を付けて保存…")) },
+                        leadingIcon = { Icon(Icons.Default.SaveAs, contentDescription = null) },
+                        onClick = { close(); dialog = Dialog.SAVE },
+                    )
+                    DropdownMenuItem(text = { Text(tr("Open project…", "プロジェクトを開く…")) }, onClick = { close(); vm.openProjectScreen() })
                     DropdownMenuItem(text = { Text(tr("Import DaVinci Resolve timeline (OTIO)…", "DaVinci Resolveのタイムラインを読み込む（OTIO）…")) }, onClick = {
                         close(); timelineLauncher.launch(arrayOf("*/*"))
                     })
@@ -198,16 +212,9 @@ fun EditorScreen(vm: EditorViewModel) {
                     DropdownMenuItem(text = { Text(tr("Export audio (WAV)", "オーディオを書き出す（WAV）")) }, onClick = {
                         close(); wavLauncher.launch("${ProjectStore.safeName(vm.projectName)}.wav")
                     })
-                    DropdownMenuItem(text = { Text(tr("Export DaVinci Resolve timeline (XML)", "DaVinci Resolveのタイムラインを書き出す（XML）")) }, onClick = {
-                        close()
-                        exportName = vm.projectName
-                        exportOtio = false
-                        dialog = Dialog.RESOLVE
-                    })
                     DropdownMenuItem(text = { Text(tr("Export DaVinci Resolve timeline (OTIO)", "DaVinci Resolveのタイムラインを書き出す（OTIO）")) }, onClick = {
                         close()
                         exportName = vm.projectName
-                        exportOtio = true
                         dialog = Dialog.RESOLVE
                     })
                 }
@@ -230,18 +237,22 @@ fun EditorScreen(vm: EditorViewModel) {
             ToolRow {
                 IconBtn(Icons.AutoMirrored.Default.Undo, tr("Undo", "元に戻す"), enabled = vm.canUndo, onClick = vm::undo)
                 IconBtn(Icons.AutoMirrored.Default.Redo, tr("Redo", "やり直す"), enabled = vm.canRedo, onClick = vm::redo)
+                MarkerColorBtn(vm)
                 FilledIconButton(onClick = vm::togglePlay) {
                     Icon(
                         if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = if (vm.isPlaying) tr("Pause", "一時停止") else tr("Play", "再生"),
                     )
                 }
-                Text(
-                    formatTime(vm.playhead),
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp,
-                )
+                Labeled(tr("Add marker (press again on a marker to edit it)", "マーカーを追加（マーカー上でもう一度押すと編集）")) {
+                    IconButton(onClick = vm::markerButton) {
+                        Icon(
+                            Icons.Default.Bookmark,
+                            contentDescription = tr("Marker", "マーカー"),
+                            tint = Color(vm.markerColor.argb),
+                        )
+                    }
+                }
                 IconBtn(Icons.Default.ZoomOut, tr("Zoom out", "縮小")) { vm.zoom(0.67f, vm.viewWidthPx / 2) }
                 IconBtn(Icons.Default.ZoomIn, tr("Zoom in", "拡大")) { vm.zoom(1.5f, vm.viewWidthPx / 2) }
             }
@@ -292,9 +303,8 @@ fun EditorScreen(vm: EditorViewModel) {
     }
 
     when (dialog) {
-        Dialog.NONE -> {}
+        Dialog.NONE -> vm.editingMarker?.let { MarkerDialog(vm, it) }
         Dialog.SAVE -> SaveDialog(vm) { dialog = Dialog.NONE }
-        Dialog.LOAD -> LoadDialog(vm) { dialog = Dialog.NONE }
         Dialog.SETTINGS -> SettingsDialog(vm) { dialog = Dialog.NONE }
         Dialog.NEW_PROJECT -> NewProjectDialog(vm) { dialog = Dialog.NONE }
         Dialog.CONFIRM_NEW -> AlertDialog(
@@ -307,22 +317,15 @@ fun EditorScreen(vm: EditorViewModel) {
         Dialog.RESOLVE -> AlertDialog(
             onDismissRequest = { dialog = Dialog.NONE },
             title = {
-                Text(
-                    if (exportOtio) tr("Export for DaVinci Resolve (OTIO)", "DaVinci Resolve用に書き出す（OTIO）")
-                    else tr("Export for DaVinci Resolve (XML)", "DaVinci Resolve用に書き出す（XML）")
-                )
+                Text(tr("Export for DaVinci Resolve (OTIO)", "DaVinci Resolve用に書き出す（OTIO）"))
             },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        (if (exportOtio) tr(
-                            "Saves the timeline as an OpenTimelineIO (.otio) file, for Resolve 18.5 and later. ",
-                            "タイムラインをOpenTimelineIO（.otio）ファイルとして保存します（Resolve 18.5以降）。",
-                        )
-                        else tr(
-                            "Saves the timeline as an .xml file, for any Resolve version. ",
-                            "タイムラインを.xmlファイルとして保存します（すべてのResolveのバージョンで使えます）。",
-                        )) + tr(
+                        tr(
+                            "Saves the timeline, with its markers, as an OpenTimelineIO (.otio) file, for Resolve 18.5 and later. ",
+                            "タイムラインをマーカーも含めてOpenTimelineIO（.otio）ファイルとして保存します（Resolve 18.5以降）。",
+                        ) + tr(
                             "Your media isn't copied: Resolve uses your original files. Copy them and the timeline file " +
                                 "to your computer.",
                             "メディアはコピーされません。Resolveは元のファイルを使います。それらとタイムラインファイルを" +
@@ -344,13 +347,11 @@ fun EditorScreen(vm: EditorViewModel) {
                     Text(
                         tr(
                             "With a folder: in Resolve use File > Import > Timeline and the clips link to the files in it.\n\n" +
-                                (if (exportOtio) "Without one: each file is named relative to the .otio, so keep them in the same folder. "
-                                else "Without one: each file is named without a folder. ") +
+                                "Without one: each file is named relative to the .otio, so keep them in the same folder. " +
                                 "If Resolve doesn't find them, drag the media into the Media Pool first, then File > Import > Timeline " +
                                 "with “Automatically import source clips into media pool” unticked. Resolve matches clips by file name.",
                             "フォルダーを指定した場合: Resolveで「ファイル > 読み込み > タイムライン」を使うと、クリップがそのフォルダー内のファイルにリンクされます。\n\n" +
-                                (if (exportOtio) "指定しない場合: 各ファイルは.otioからの相対パスになるため、同じフォルダーに置いてください。"
-                                else "指定しない場合: 各ファイルはフォルダーなしのファイル名になります。") +
+                                "指定しない場合: 各ファイルは.otioからの相対パスになるため、同じフォルダーに置いてください。" +
                                 "Resolveがファイルを見つけられない場合は、先にメディアをメディアプールにドラッグしてから、" +
                                 "「ソースクリップをメディアプールに自動で読み込む」のチェックを外して「ファイル > 読み込み > タイムライン」を実行してください。" +
                                 "Resolveはファイル名でクリップを照合します。",
@@ -365,8 +366,8 @@ fun EditorScreen(vm: EditorViewModel) {
                 val fileName = ProjectStore.safeName(exportName.ifBlank { vm.projectName })
                 TextButton(onClick = {
                     dialog = Dialog.NONE
-                    if (exportOtio) otioLauncher.launch("$fileName.otio") else xmlLauncher.launch("$fileName.xml")
-                }) { Text(if (exportOtio) tr("Save .otio", ".otioを保存") else tr("Save .xml", ".xmlを保存")) }
+                    otioLauncher.launch("$fileName.otio")
+                }) { Text(tr("Save .otio", ".otioを保存")) }
             },
             dismissButton = { TextButton(onClick = { dialog = Dialog.NONE }) { Text(tr("Cancel", "キャンセル")) } },
         )
@@ -426,7 +427,7 @@ private fun SaveDialog(vm: EditorViewModel, close: () -> Unit) {
     val overwrite = vm.wouldOverwrite(name)
     AlertDialog(
         onDismissRequest = close,
-        title = { Text(tr("Save project", "プロジェクトを保存")) },
+        title = { Text(tr("Save as", "名前を付けて保存")) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text(tr("Project name", "プロジェクト名")) }, singleLine = true)
@@ -450,8 +451,12 @@ private fun SaveDialog(vm: EditorViewModel, close: () -> Unit) {
     )
 }
 
+/**
+ * The project list: shown when the app opens, and from Project > Open. Tap a project to open it (it opens where
+ * you left it), or start a new one. Opened from the editor, the back arrow returns to it.
+ */
 @Composable
-private fun LoadDialog(vm: EditorViewModel, close: () -> Unit) {
+private fun ProjectScreen(vm: EditorViewModel, newProject: () -> Unit) {
     // Looking up media sizes touches every file, so the list is read in the background.
     var projects by remember { mutableStateOf<List<ProjectStore.Info>?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
@@ -459,6 +464,57 @@ private fun LoadDialog(vm: EditorViewModel, close: () -> Unit) {
     var confirmDelete by remember { mutableStateOf<String?>(null) }
     var confirmOpen by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
+    BackHandler(enabled = vm.canLeaveProjects, onBack = vm::closeProjectScreen)
+
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (vm.canLeaveProjects) {
+                IconBtn(Icons.AutoMirrored.Default.ArrowBack, tr("Back to the editor", "エディターに戻る"), onClick = vm::closeProjectScreen)
+            }
+            Text(
+                tr("Projects", "プロジェクト"),
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.weight(1f).padding(horizontal = 12.dp),
+            )
+            FilledIconButton(onClick = newProject) {
+                Icon(Icons.Default.Add, contentDescription = tr("New project", "新規プロジェクト"))
+            }
+        }
+        val list = projects
+        when {
+            list == null -> Text(tr("Loading…", "読み込み中…"), Modifier.padding(16.dp))
+            list.isEmpty() -> Text(
+                tr("No saved projects yet. Tap + to start one.", "保存されたプロジェクトはまだありません。＋で新しく始めましょう。"),
+                Modifier.padding(16.dp),
+            )
+            else -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 8.dp)) {
+                list.forEach { info ->
+                    val p = info.name
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .clickable { if (vm.dirty) confirmOpen = p else vm.loadProject(p) }
+                            .padding(start = 8.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(p, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                projectDetails(context, info),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        IconButton(onClick = { confirmDelete = p }) {
+                            Icon(Icons.Default.Delete, contentDescription = tr("Delete project $p", "プロジェクト「$p」を削除"))
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     confirmDelete?.let { p ->
         AlertDialog(
@@ -477,58 +533,16 @@ private fun LoadDialog(vm: EditorViewModel, close: () -> Unit) {
             },
             dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text(tr("Cancel", "キャンセル")) } },
         )
-        return
     }
     confirmOpen?.let { p ->
         AlertDialog(
             onDismissRequest = { confirmOpen = null },
             title = { Text(tr("Open “$p”?", "「$p」を開きますか？")) },
             text = { Text(unsavedWarning(vm.projectName)) },
-            confirmButton = { TextButton(onClick = { close(); vm.loadProject(p) }) { Text(tr("Discard and open", "破棄して開く")) } },
+            confirmButton = { TextButton(onClick = { confirmOpen = null; vm.loadProject(p) }) { Text(tr("Discard and open", "破棄して開く")) } },
             dismissButton = { TextButton(onClick = { confirmOpen = null }) { Text(tr("Cancel", "キャンセル")) } },
         )
-        return
     }
-
-    AlertDialog(
-        onDismissRequest = close,
-        title = { Text(tr("Open project", "プロジェクトを開く")) },
-        text = {
-            val list = projects
-            when {
-                list == null -> Text(tr("Loading…", "読み込み中…"))
-                list.isEmpty() -> Text(tr("No saved projects yet.", "保存されたプロジェクトはまだありません。"))
-                else -> Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    list.forEach { info ->
-                        val p = info.name
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            TextButton(
-                                onClick = { if (vm.dirty) confirmOpen = p else { close(); vm.loadProject(p) } },
-                                modifier = Modifier.weight(1f),
-                            ) {
-                                Column(Modifier.fillMaxWidth()) {
-                                    Text(p, style = MaterialTheme.typography.bodyLarge)
-                                    Text(
-                                        projectDetails(context, info),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            }
-                            IconButton(onClick = { confirmDelete = p }) {
-                                Icon(Icons.Default.Delete, contentDescription = tr("Delete project $p", "プロジェクト「$p」を削除"))
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = close) { Text(tr("Close", "閉じる")) } },
-    )
 }
 
 /** Two lines, e.g. "Opened 10 Nov 2026, 14:23" and "1.2 GB of media · 1 file missing", in the phone's own format. */
@@ -696,11 +710,12 @@ private fun SettingsDialog(vm: EditorViewModel, close: () -> Unit) {
                     tr("Crossfade length: ", "クロスフェードの長さ: ") + "${"%.2f".format(vm.crossfadeSeconds)} " + tr("s", "秒"),
                     style = MaterialTheme.typography.titleSmall,
                 )
+                // Same curve as the fade sliders: 0 to 5 s with 1 s in the middle (shortest 0.05 s).
                 Slider(
-                    value = vm.crossfadeSeconds,
-                    onValueChange = { vm.updateCrossfadeSeconds((it * 4).toInt() / 4f) },
-                    valueRange = 0.25f..4f,
-                    steps = 14,
+                    value = fadeSliderPosSeconds(vm.crossfadeSeconds.toDouble()),
+                    onValueChange = {
+                        vm.updateCrossfadeSeconds((Math.round(fadeSliderSeconds(it) * 20) / 20f).coerceIn(0.05f, MAX_FADE_SECONDS.toFloat()))
+                    },
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -770,8 +785,8 @@ private fun FadeControl(
     onChange: (Long) -> Unit,
 ) {
     var editing by remember { mutableStateOf(false) }
-    val maxFrames = minOf(available, 10L * SAMPLE_RATE).coerceAtLeast(1L)
-    // The slider is exponential: halfway is 2.5s, the far end 10s, so short fades get most of the travel.
+    val maxFrames = minOf(available, MAX_FADE_SECONDS * SAMPLE_RATE).coerceAtLeast(1L)
+    // The slider is exponential: the middle is 1s, the far end 5s, so short fades get most of the travel.
     val maxPos = fadeSliderPos(maxFrames)
     Column(modifier) {
         Text(
@@ -790,12 +805,14 @@ private fun FadeControl(
     }
 }
 
-// Fade slider curve: seconds = 1.25 * (9^pos - 1), so pos 0 -> 0s, 0.5 -> 2.5s, 1 -> 10s.
-private fun fadeSliderFrames(pos: Float): Long =
-    (1.25 * (Math.pow(9.0, pos.toDouble()) - 1.0) * SAMPLE_RATE).roundToLong().coerceAtLeast(0L)
+// Fade slider curve: seconds = (16^pos - 1) / 3, so pos 0 -> 0s, 0.5 -> 1s (the middle), 1 -> 5s.
+private fun fadeSliderSeconds(pos: Float): Double = (Math.pow(16.0, pos.toDouble()) - 1.0) / 3.0
 
-private fun fadeSliderPos(frames: Long): Float =
-    (ln(frames.toDouble() / SAMPLE_RATE / 1.25 + 1.0) / ln(9.0)).toFloat()
+private fun fadeSliderFrames(pos: Float): Long = (fadeSliderSeconds(pos) * SAMPLE_RATE).roundToLong().coerceAtLeast(0L)
+
+private fun fadeSliderPosSeconds(seconds: Double): Float = (ln(seconds * 3.0 + 1.0) / ln(16.0)).toFloat()
+
+private fun fadeSliderPos(frames: Long): Float = fadeSliderPosSeconds(frames.toDouble() / SAMPLE_RATE)
 
 /** Asked when importing onto a timeline that already has clips: where the new media (or timeline) should go. */
 @Composable
@@ -929,6 +946,73 @@ private fun GradeSlider(
             valueRange = range,
         )
     }
+}
+
+/** A round colour swatch; ringed when [selected]. */
+@Composable
+private fun Swatch(color: MarkerColor, size: androidx.compose.ui.unit.Dp, selected: Boolean = false) {
+    Box(
+        Modifier.size(size)
+            .background(Color(color.argb), CircleShape)
+            .border(if (selected) 2.dp else 1.dp, if (selected) Color.White else Color.Black.copy(alpha = 0.4f), CircleShape)
+    )
+}
+
+/** The smaller button beside play: picks the colour for new markers, like the colour menu by Resolve's marker button. */
+@Composable
+private fun MarkerColorBtn(vm: EditorViewModel) {
+    var open by remember { mutableStateOf(false) }
+    val label = tr("Marker colour: ", "マーカーの色: ") + vm.markerColor.label
+    Box {
+        Labeled(label) {
+            IconButton(onClick = { open = true }, modifier = Modifier.size(36.dp)) { Swatch(vm.markerColor, 18.dp) }
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            MarkerColor.entries.forEach { c ->
+                DropdownMenuItem(
+                    text = { Text(c.label) },
+                    leadingIcon = { Swatch(c, 18.dp, selected = c == vm.markerColor) },
+                    onClick = { open = false; vm.updateMarkerColor(c) },
+                )
+            }
+        }
+    }
+}
+
+/** Opened by pressing the marker button on a marker, as in Resolve: name, note, colour, or delete it. */
+@Composable
+private fun MarkerDialog(vm: EditorViewModel, marker: Marker) {
+    var name by remember(marker.id) { mutableStateOf(marker.name) }
+    var note by remember(marker.id) { mutableStateOf(marker.note) }
+    var color by remember(marker.id) { mutableStateOf(marker.color) }
+    AlertDialog(
+        onDismissRequest = vm::closeMarker,
+        title = { Text(tr("Marker at ", "マーカー ") + formatTime(marker.frame)) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(name, { name = it }, label = { Text(tr("Name", "名前")) }, singleLine = true)
+                OutlinedTextField(note, { note = it }, label = { Text(tr("Notes", "メモ")) }, minLines = 2)
+                Text(tr("Colour: ", "色: ") + color.label, style = MaterialTheme.typography.titleSmall)
+                // Two rows of eight, Resolve's order.
+                MarkerColor.entries.chunked(8).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        row.forEach { c ->
+                            Box(Modifier.clickable { color = c }.padding(2.dp)) { Swatch(c, 24.dp, selected = c == color) }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { vm.updateMarker(marker.copy(name = name, note = note, color = color)) }) { Text(tr("Done", "完了")) }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { vm.deleteMarker(marker.id) }) { Text(tr("Delete", "削除"), color = MaterialTheme.colorScheme.error) }
+                TextButton(onClick = vm::closeMarker) { Text(tr("Cancel", "キャンセル")) }
+            }
+        },
+    )
 }
 
 /** A symbol button that stays highlighted while switched on. */

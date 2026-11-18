@@ -82,7 +82,7 @@ private val HeaderGap = 4.dp
 /**
  * Gestures:
  *  - drag on the ruler (top strip), or swipe starting on the playhead line: move the playhead
- *    (it snaps to clip edges and cuts when snapping is on)
+ *    (it snaps to clip edges, cuts and markers when snapping is on). Markers show as flags on the ruler.
  *  - tap a clip: select it.  Tap empty space: deselect and move the playhead there
  *  - press and drag a clip: move it (and anything linked to it) in time, or to another track of the same kind
  *  - press and drag a clip's edge: shorten or extend it
@@ -448,6 +448,22 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                 drawText(textMeasurer, rulerLabel(sec, stepSec), Offset(x + 4f, 2f), TextStyle(color = TextDim, fontSize = 10.sp))
             }
             i++
+        }
+
+        // Markers: Resolve-style flags (a square with a point at the bottom) along the lower edge of the ruler.
+        val mw = 6.dp.toPx()
+        val mTop = rulerH * 0.35f
+        for (m in vm.markers) {
+            val x = xOf(m.frame)
+            if (x < headerW - mw || x > w + mw) continue
+            val flag = Path().apply {
+                moveTo(x - mw, mTop); lineTo(x + mw, mTop); lineTo(x + mw, rulerH - mw)
+                lineTo(x, rulerH); lineTo(x - mw, rulerH - mw); close()
+            }
+            clipRect(headerW, 0f, w, h) {
+                drawPath(flag, Color(m.color.argb))
+                drawPath(flag, Color.Black.copy(alpha = 0.5f), style = Stroke(width = 1f))
+            }
         }
 
         // Playhead

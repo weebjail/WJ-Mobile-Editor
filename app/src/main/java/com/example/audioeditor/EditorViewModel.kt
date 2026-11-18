@@ -21,6 +21,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.abs
 
 /** Where imported media or a timeline goes when the timeline already has clips. */
 enum class Placement { PLAYHEAD, END, NEW_TRACK }
@@ -175,13 +176,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     val selectedClip: Clip?
         get() {
             overrideSelectedId?.let { oid -> clips.find { it.id == oid }?.takeIf(::isEditable)?.let { return it } }
-            // Inside a crossfade both clips are under the playhead; each owns its half, as on screen.
-            return clips.filter { playhead >= it.start && playhead < it.end && isEditable(it) }
-                .minWithOrNull(
-                    compareBy<Clip> { it.video }.thenBy { it.track }
-                        .thenByDescending { minOf(playhead - it.start, it.end - playhead) }
-                )
+            return clipUnderPlayhead { playhead >= it.start && playhead < it.end }
         }
+
+    /** The editable clip under the playhead that [under] accepts: audio before video, lowest track first. */
+    private fun clipUnderPlayhead(under: (Clip) -> Boolean): Clip? =
+        // Inside a crossfade both clips are under the playhead; each owns its half, as on screen.
+        clips.filter { under(it) && isEditable(it) }
+            .minWithOrNull(
+                compareBy<Clip> { it.video }.thenBy { it.track }
+                    .thenByDescending { minOf(playhead - it.start, it.end - playhead) }
+            )
 
     /** A clip together with the clips linked to it (a video and its camera audio). */
     private fun group(c: Clip, list: List<Clip> = clips): List<Clip> =
@@ -197,11 +202,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------ Undo / redo
 
-    private data class Snapshot(val clips: List<Clip>, val trackCount: Int, val videoTrackCount: Int)
+    /**
+     * One undo step. [playhead] is where the playhead was when the edit was made: undoing or redoing that edit
+     * takes the playhead (and the viewer) back there, scrolling the timeline if it's off screen.
+     */
+    private data class Snapshot(
+        val clips: List<Clip>, val trackCount: Int, val videoTrackCount: Int, val markers: List<Marker>, val playhead: Long,
+    )
     private val undoStack = ArrayDeque<Snapshot>()
     private val redoStack = ArrayDeque<Snapshot>()
 
-    private fun snapshot() = Snapshot(clips, trackCount, videoTrackCount)
+    private fun snapshot() = Snapshot(clips, trackCount, videoTrackCount, markers, playhead)
 
     private fun refreshHistory() { canUndo = undoStack.isNotEmpty(); canRedo = redoStack.isNotEmpty() }
 
@@ -226,25 +237,28 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun commit(new: List<Clip>) { pushUndo(); applyClips(new) }
 
     private fun restore(s: Snapshot) {
+        stop()
         trackCount = s.trackCount
         videoTrackCount = s.videoTrackCount
+        markers = s.markers
         applyClips(withCurve(s.clips))
+        playhead = s.playhead
         refreshHistory()
         dirty = true
+        revealPlayhead()
     }
 
+    // The step moved to the other stack keeps the edit's playhead, so undo and redo both go to where it was made.
     fun undo() {
         val s = undoStack.removeLastOrNull() ?: return
-        redoStack.addLast(snapshot())
+        redoStack.addLast(snapshot().copy(playhead = s.playhead))
         restore(s)
-        revealPlayhead()
     }
 
     fun redo() {
         val s = redoStack.removeLastOrNull() ?: return
-        undoStack.addLast(snapshot())
+        undoStack.addLast(snapshot().copy(playhead = s.playhead))
         restore(s)
-        revealPlayhead()
     }
 
     // ------------------------------------------------------------ Import
@@ -736,6 +750,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val edges = ArrayList<Long>(clips.size * 2 + 1)
             edges += 0L
             for (c in clips) { edges += c.start; edges += c.end }
+            for (m in markers) edges += m.frame
             val (s, l) = TimelineOps.snap(f, 0L, edges, (snapThresholdPx * samplesPerPx).toLong())
             f = s
             line = l
@@ -804,9 +819,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun rippleTrimEdit(atStart: Boolean) {
-        val t = selectedClip ?: run { message = tr("Move the playhead over a clip first", "先に再生ヘッドをクリップの上に移動してください"); return }
+        // The clip at the playhead. The selected clip only counts if the playhead is inside it
+        // (that's how to pick between clips stacked on different tracks).
+        val t = selectedClip?.takeIf { s -> group(s).any(::inside) } ?: clipUnderPlayhead(::inside)
+            ?: run { message = tr("Move the playhead inside a clip to trim it", "トリムするには再生ヘッドをクリップの内側に移動してください"); return }
         val members = group(t).filter(::inside)
-        if (members.isEmpty()) { message = tr("Move the playhead inside the clip to trim it", "トリムするには再生ヘッドをクリップの内側に移動してください"); return }
         if (rippleAllTracks) {
             // Remove that stretch of time from every track.
             val from = if (atStart) members.minOf { it.start } else playhead
@@ -944,9 +961,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return (r as? TimelineOps.CrossfadeResult.Done)?.clips
     }
 
-    /** The longest crossfade (up to 10 s) the media either side of the cut allows. */
+    /** The longest crossfade (up to [MAX_FADE_SECONDS]) the media either side of the cut allows. */
     fun maxCrossfadeFrames(p: CrossfadePair): Long {
-        val new = crossfadeOf(crossfadeBase ?: clips, p, 10L * SAMPLE_RATE) ?: return p.frames
+        val new = crossfadeOf(crossfadeBase ?: clips, p, MAX_FADE_SECONDS * SAMPLE_RATE) ?: return p.frames
         val a = new.find { it.id == p.out.id } ?: return p.frames
         val b = new.find { it.id == p.into.id } ?: return p.frames
         return maxOf(a.end - b.start, p.frames)
@@ -967,6 +984,58 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         crossfadeBase = null
         crossfadeIds = null
     }
+
+    // ------------------------------------------------------------ Markers (like Resolve's timeline markers)
+
+    var markers by mutableStateOf<List<Marker>>(emptyList()); private set
+
+    /** Colour for new markers, chosen with the button beside play (remembered between sessions). */
+    var markerColor by mutableStateOf(
+        MarkerColor.entries.find { it.name == prefs.getString(KEY_MARKER_COLOR, null) } ?: MarkerColor.BLUE
+    ); private set
+
+    fun updateMarkerColor(c: MarkerColor) {
+        markerColor = c
+        prefs.edit().putString(KEY_MARKER_COLOR, c.name).apply()
+    }
+
+    /** The marker being edited in the marker dialog. */
+    var editingMarker by mutableStateOf<Marker?>(null); private set
+
+    /** A marker at the playhead (within a few pixels), if there is one. */
+    private fun markerAtPlayhead(): Marker? {
+        val tolerance = (samplesPerPx * 3).toLong()
+        return markers.filter { abs(it.frame - playhead) <= tolerance }.minByOrNull { abs(it.frame - playhead) }
+    }
+
+    /**
+     * The marker button, as in Resolve: adds a marker at the playhead in the current colour. Pressed again on a
+     * marker (while stopped) it opens that marker so it can be named, noted, recoloured or deleted.
+     * During playback it just keeps adding markers.
+     */
+    fun markerButton() {
+        if (!isPlaying) markerAtPlayhead()?.let { editingMarker = it; return }
+        val frame = if (playbackRunning) player.position() else playhead
+        pushUndo()
+        markers = (markers + Marker(newId(), frame, markerColor)).sortedBy { it.frame }
+    }
+
+    fun updateMarker(m: Marker) {
+        editingMarker = null
+        val old = markers.find { it.id == m.id } ?: return
+        if (old == m) return
+        pushUndo()
+        markers = markers.map { if (it.id == m.id) m else it }
+    }
+
+    fun deleteMarker(id: Long) {
+        editingMarker = null
+        if (markers.none { it.id == id }) return
+        pushUndo()
+        markers = markers.filter { it.id != id }
+    }
+
+    fun closeMarker() { editingMarker = null }
 
     // ------------------------------------------------------------ Dragging clips (linked clips move together)
 
@@ -994,6 +1063,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             edges += 0L
             edges += playhead
             for (c in clips) if (c.id !in ids) { edges += c.start; edges += c.end }
+            for (m in markers) edges += m.frame
             val (s, l) = TimelineOps.snap(start, lead.length, edges, (snapThresholdPx * samplesPerPx).toLong())
             start = s
             line = l
@@ -1061,6 +1131,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             edges += 0L
             edges += playhead
             for (c in clips) if (c.id !in ids) { edges += c.start; edges += c.end }
+            for (m in markers) edges += m.frame
             val (s, l) = TimelineOps.snap(edge + d, 0L, edges, (snapThresholdPx * samplesPerPx).toLong())
             if (l != null && s - edge in trimRange) { d = s - edge; line = l }
         }
@@ -1191,6 +1262,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         videoTrackCount, mutedTracks,
         lockedAudio = lockedAudio, lockedVideo = lockedVideo,
         frameRate = frameRate.name, width = timelineWidth, height = timelineHeight,
+        markers = markers,
     )
 
     /** True if saving under [name] would replace a different, existing project. */
@@ -1199,6 +1271,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return safe != savedName && ProjectStore.exists(ctx, safe)
     }
 
+    /** True once the project has a file of its own, so Save can write straight to it. */
+    val hasProjectFile: Boolean get() = savedName != null
+
+    /**
+     * Save: writes the current project to its own file. Returns false (nothing saved) when it has never been
+     * saved, so the screen asks for a name instead, as Save As.
+     */
+    fun save(): Boolean {
+        val name = savedName ?: return false
+        saveProject(name)
+        return true
+    }
+
+    /** Save As: writes the project under [name], which then becomes the current project. */
     fun saveProject(name: String = projectName) {
         val safe = ProjectStore.safeName(name)
         try {
@@ -1207,10 +1293,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             projectName = safe
             savedName = safe
             dirty = false
+            rememberView()
             message = tr("Project '$safe' saved", "プロジェクト「$safe」を保存しました")
         } catch (e: Exception) {
             message = tr("Couldn't save: ", "保存できませんでした: ") + e.message
         }
+    }
+
+    /** Remembers where the playhead, scroll and zoom are, so opening the project again goes back there. */
+    private fun rememberView(name: String? = savedName) {
+        name ?: return
+        ProjectStore.saveView(ctx, name, ViewState(if (isPlaying) player.position() else playhead, scrollFrames, samplesPerPx))
     }
 
     /**
@@ -1218,14 +1311,33 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * "Autosave" if it has never been saved, so it never overwrites a different project.
      */
     fun autoSave() {
-        if (!dirty || clips.isEmpty()) return
         val target = savedName
-        try {
-            ProjectStore.save(ctx, projectData(target ?: AUTOSAVE_NAME))
-            if (target != null) dirty = false
-        } catch (_: Exception) {
+        if (dirty && clips.isNotEmpty()) {
+            try {
+                ProjectStore.save(ctx, projectData(target ?: AUTOSAVE_NAME))
+                if (target != null) dirty = false
+                if (target == null) rememberView(AUTOSAVE_NAME)
+            } catch (_: Exception) {
+            }
         }
+        rememberView()
     }
+
+    // ------------------------------------------------------------ Project screen (shown when the app opens)
+
+    var showProjects by mutableStateOf(true); private set
+
+    /** True when the project screen was opened from the editor (not at start-up), so it can go back to it. */
+    var canLeaveProjects by mutableStateOf(false); private set
+
+    fun openProjectScreen() {
+        stop()
+        rememberView()
+        showProjects = true
+        canLeaveProjects = true
+    }
+
+    fun closeProjectScreen() { if (canLeaveProjects) showProjects = false }
 
     fun loadProject(name: String) {
         stop()
@@ -1266,13 +1378,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     ?: firstVideo?.let { FrameRate.closestTo(it.fps) } ?: DEFAULT_FRAME_RATE
                 timelineWidth = data.width ?: firstVideo?.width?.coerceIn(MIN_RESOLUTION, MAX_RESOLUTION) ?: DEFAULT_WIDTH
                 timelineHeight = data.height ?: firstVideo?.height?.coerceIn(MIN_RESOLUTION, MAX_RESOLUTION) ?: DEFAULT_HEIGHT
-                playhead = data.playhead
-                scrollFrames = 0.0
+                // Back to where the project was left: playhead, scroll and zoom (older projects: the saved playhead).
+                val view = withContext(Dispatchers.IO) { ProjectStore.loadView(ctx, name) }
+                markers = data.markers
+                playhead = view?.playhead ?: data.playhead
+                view?.let { samplesPerPx = it.samplesPerPx.coerceIn(1.0, SAMPLE_RATE * 2.0) }
+                scrollFrames = view?.scrollFrames?.coerceAtLeast(0.0) ?: 0.0
                 overrideSelectedId = null
                 // New clips must never reuse an ID from the loaded project.
                 nextId = maxOf(
                     nextId,
-                    (loadedClips.flatMap { listOfNotNull(it.id, it.linkId) } + data.sources.map { it.id })
+                    (loadedClips.flatMap { listOfNotNull(it.id, it.linkId) } + data.sources.map { it.id } + data.markers.map { it.id })
                         .maxOrNull()?.plus(1) ?: 1L,
                 )
                 clearHistory()
@@ -1282,6 +1398,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 dirty = false
                 ProjectStore.markOpened(ctx, name)
                 loadThumbnails(loaded.values)
+                revealPlayhead()
+                showProjects = false
                 message = if (missing.isEmpty()) tr("Loaded '${data.name}'", "「${data.name}」を読み込みました")
                 else tr(
                     "Loaded '${data.name}', but couldn't open: ${missing.joinToString(", ")}. Those clips will be silent.",
@@ -1310,12 +1428,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         lockedAudio = emptySet()
         lockedVideo = emptySet()
         applyClips(emptyList())
+        markers = emptyList()
         overrideSelectedId = null
         playhead = 0L
         scrollFrames = 0.0
         projectName = ProjectStore.safeName(name)
         savedName = null
         dirty = false
+        showProjects = false
         message = tr("New project started", "新しいプロジェクトを開始しました") + " (${rate.label} fps, ${width}×$height)"
     }
 
@@ -1369,15 +1489,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun usedMediaNames(): List<String> =
         clips.map { it.sourceId }.distinct().mapNotNull { sources[it]?.name }.distinct().sorted()
 
-    /** Writes the Resolve timeline to [uri] as FCP7 XML, or OpenTimelineIO when [otio]. The media stays where it is. */
-    fun exportResolve(uri: Uri, name: String, otio: Boolean) {
+    /** Writes the Resolve timeline to [uri] as OpenTimelineIO. The media stays where it is. */
+    fun exportResolve(uri: Uri, name: String) {
         if (clips.isEmpty()) { message = tr("Nothing to export yet", "書き出すものがまだありません"); return }
         stop()
         val rate = frameRate
         val folder = resolveMediaFolder
         val timeline = Exporters.Timeline(
             name, clips, sources, trackCount, videoTrackCount, mutedTracks, timelineWidth, timelineHeight,
-            lockedAudio, lockedVideo,
+            lockedAudio, lockedVideo, markers,
         )
         viewModelScope.launch {
             busy = tr("Saving Resolve timeline…", "Resolve用タイムラインを保存中…")
@@ -1385,8 +1505,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(Dispatchers.IO) {
                     val out = ctx.contentResolver.openOutputStream(uri, "wt") ?: throw IOException(tr("Couldn't open the file", "ファイルを開けませんでした"))
                     out.use {
-                        if (otio) Exporters.writeResolveOtio(it, timeline, rate, folder)
-                        else Exporters.writeResolveXml(it, timeline, rate, folder)
+                        Exporters.writeResolveOtio(it, timeline, rate, folder)
                     }
                 }
                 message = tr(
@@ -1412,6 +1531,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_RIPPLE_ALL = "rippleAllTracks"
         const val KEY_PAUSE_ON_SEEK = "pauseOnSeek"
         const val KEY_RESOLVE_FOLDER = "resolveMediaFolder"
+        const val KEY_MARKER_COLOR = "markerColor"
         const val AUTOSAVE_NAME = "Autosave"
         val UNTITLED_NAMES = setOf("Untitled", "無題")
 
