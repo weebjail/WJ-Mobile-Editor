@@ -31,7 +31,9 @@ import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
@@ -47,7 +49,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-private enum class Mode { UNDECIDED, SCRUB, PLAYHEAD, MOVE, TRIM, PAN, PINCH }
+private enum class Mode { UNDECIDED, SCRUB, PLAYHEAD, MOVE, TRIM, PAN, PINCH, HELD }
 
 /** A clip edge under the finger: which clip, which end, and how far the finger is from it (px). */
 private class EdgeHit(val clip: Clip, val atStart: Boolean, val distance: Float)
@@ -96,6 +98,7 @@ private val HeaderGap = 4.dp
 fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
     val textMeasurer = rememberTextMeasurer()
     val density = LocalDensity.current
+    val haptics = LocalHapticFeedback.current
     val rulerH = with(density) { TimelineRulerHeight.toPx() }
     val trackH = with(density) { 72.dp.toPx() }
     val headerW = with(density) { TimelineHeaderWidth.toPx() }
@@ -177,8 +180,22 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     var mode = if (onRuler) Mode.SCRUB else Mode.UNDECIDED
                     if (onRuler) vm.scrubTo(frameAt(down.position.x), snapPx)
                     var total = Offset.Zero
+                    // Holding a finger on a track header (without moving) asks to delete that track.
+                    val holdUntil = down.uptimeMillis + viewConfiguration.longPressTimeoutMillis
                     while (true) {
-                        val event = awaitPointerEvent()
+                        val event = if (onHeader && mode == Mode.UNDECIDED) {
+                            val now = currentEvent.changes.firstOrNull()?.uptimeMillis ?: down.uptimeMillis
+                            withTimeoutOrNull((holdUntil - now).coerceAtLeast(1L)) { awaitPointerEvent() }
+                        } else awaitPointerEvent()
+                        if (event == null) {
+                            mode = Mode.HELD
+                            val lane = laneAt(down.position.y)
+                            if (lane in 0 until vm.laneCount) {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                vm.askDeleteTrack(lane)
+                            }
+                            continue
+                        }
                         val pressed = event.changes.filter { it.pressed }
                         if (pressed.isEmpty()) break
                         if (pressed.size >= 2 || mode == Mode.PINCH) {
@@ -230,7 +247,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                                     val (video, track) = vm.laneKind(lane)
                                     val laneTop = rulerH + lane * trackH - scrollY
                                     val buttonsTop = laneTop + trackH - HeaderButton.toPx() - 12.dp.toPx()
-                                    // Track name (top): make it the paste track.  Below it, left half: lock button,
+                                    // Track name (top): make it the destination track for paste and import (hold to delete the track).  Below it, left half: lock button,
                                     // right half: mute button (audio tracks only).
                                     if (down.position.y < buttonsTop) vm.setTarget(video, track)
                                     else if (down.position.x < headerW / 2 || video) vm.toggleLock(video, track)

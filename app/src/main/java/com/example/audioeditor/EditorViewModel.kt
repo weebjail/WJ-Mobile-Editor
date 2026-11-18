@@ -208,11 +208,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     private data class Snapshot(
         val clips: List<Clip>, val trackCount: Int, val videoTrackCount: Int, val markers: List<Marker>, val playhead: Long,
+        val muted: Set<Int>, val lockedAudio: Set<Int>, val lockedVideo: Set<Int>, val targetAudio: Int, val targetVideo: Int,
     )
     private val undoStack = ArrayDeque<Snapshot>()
     private val redoStack = ArrayDeque<Snapshot>()
 
-    private fun snapshot() = Snapshot(clips, trackCount, videoTrackCount, markers, playhead)
+    private fun snapshot() = Snapshot(
+        clips, trackCount, videoTrackCount, markers, playhead, mutedTracks, lockedAudio, lockedVideo, targetAudio, targetVideo,
+    )
 
     private fun refreshHistory() { canUndo = undoStack.isNotEmpty(); canRedo = redoStack.isNotEmpty() }
 
@@ -238,6 +241,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun restore(s: Snapshot) {
         stop()
+        // Mute, lock and paste-track settings aren't undo steps of their own; they're only put back when the
+        // number of tracks changes (undoing a track delete), where they'd otherwise end up on the wrong tracks.
+        if (s.trackCount != trackCount || s.videoTrackCount != videoTrackCount) {
+            mutedTracks = s.muted
+            lockedAudio = s.lockedAudio
+            lockedVideo = s.lockedVideo
+            targetAudio = s.targetAudio
+            targetVideo = s.targetVideo
+        }
         trackCount = s.trackCount
         videoTrackCount = s.videoTrackCount
         markers = s.markers
@@ -344,17 +356,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val added = ArrayList<Clip>()
             var tracks = trackCount
             var vTracks = videoTrackCount
-            val explicitTrack = if (placement == Placement.NEW_TRACK) null else overrideSelectedId
-                ?.let { id -> clips.find { it.id == id } }
-                ?.takeIf { !it.video && it.linkId == null && isEditable(it) }?.track
+            // Like Resolve's destination tracks: video goes on the selected video track and audio on the
+            // selected audio track (the highlighted track names), unless they're locked.
+            val toTracks = placement != Placement.NEW_TRACK
+            val hasCameraAudio = decoded.any { it.video != null && it.hasAudio }
+            val destAudio = targetAudio.takeIf { toTracks && it < tracks && !isLocked(false, it) }
+            val destVideo = targetVideo.takeIf { toTracks && it < vTracks && !isLocked(true, it) }
 
             /**
              * First unlocked audio track holding only camera audio (or only recorder audio), adding one if needed.
-             * New clips never go onto a locked track.
+             * New clips never go onto a locked track. [skip] is a track to leave alone.
              */
-            fun pickTrack(camera: Boolean): Int {
+            fun pickTrack(camera: Boolean, skip: Int? = null): Int {
                 for (t in 0 until tracks) {
-                    if (isLocked(false, t)) continue
+                    if (isLocked(false, t) || t == skip) continue
                     if ((working + added).filter { !it.video && it.track == t }.all { (it.linkId != null) == camera }) return t
                 }
                 if (tracks < MAX_AUDIO_TRACKS) return tracks++
@@ -383,7 +398,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (needCam) camTrack = tracks++
                 if (needRec) recTrack = tracks++
             } else {
-                videoTrack = (0 until vTracks).firstOrNull { !isLocked(true, it) }
+                videoTrack = destVideo ?: (0 until vTracks).firstOrNull { !isLocked(true, it) }
                     ?: if (vTracks < MAX_VIDEO_TRACKS) vTracks else 0
             }
 
@@ -394,7 +409,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             for (src in decoded) {
                 newSources[src.id] = src
                 if (src.video != null) {
-                    val cam = if (src.hasAudio) camTrack ?: pickTrack(camera = true) else -1
+                    val cam = if (src.hasAudio) camTrack ?: destAudio ?: pickTrack(camera = true) else -1
                     if (videoTrack >= vTracks) vTracks = videoTrack + 1   // all video tracks locked: add one
                     val link = if (cam >= 0) newId() else null
                     added += Clip(newId(), src.id, videoTrack, videoAt, 0L, src.frames, video = true, linkId = link)
@@ -406,7 +421,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     videoAt += src.frames
                 } else {
-                    val track = recTrack ?: explicitTrack ?: pickTrack(camera = false)
+                    // With videos in the same import, their sound takes the selected audio track and these go on another.
+                    val track = recTrack ?: (if (hasCameraAudio) null else destAudio) ?: pickTrack(camera = false, skip = destAudio)
                     added += Clip(
                         newId(), src.id, track, audioAt, 0L, src.frames,
                         Fade(curve = defaultCurve), Fade(curve = defaultCurve),
@@ -872,7 +888,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     val canPaste: Boolean get() = clipboard != null
 
     /**
-     * Paste destinations, like Resolve's destination track controls: pasted audio goes on [targetAudio] and
+     * Destination tracks for paste and import, like Resolve's destination track controls: audio goes on [targetAudio] and
      * video on [targetVideo] (tracks further down for clips copied from several tracks). Set from the track headers.
      */
     var targetAudio by mutableIntStateOf(0); private set
@@ -984,6 +1000,68 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (videoTrackCount >= MAX_VIDEO_TRACKS) { message = tr("$MAX_VIDEO_TRACKS video tracks is the maximum", "ビデオトラックは最大${MAX_VIDEO_TRACKS}本です"); return }
         pushUndo()
         videoTrackCount++
+    }
+
+    /** A track waiting for the user to confirm deleting it (asked by pressing and holding its header). */
+    class TrackToDelete(val video: Boolean, val track: Int, val clipCount: Int) {
+        val name: String get() = (if (video) "V" else "A") + (track + 1)
+    }
+
+    var trackToDelete by mutableStateOf<TrackToDelete?>(null); private set
+
+    /** Asks to delete the track in [lane]. The last video or audio track can't be deleted, nor a locked one. */
+    fun askDeleteTrack(lane: Int) {
+        val (video, track) = laneKind(lane)
+        val name = (if (video) "V" else "A") + (track + 1)
+        when {
+            (if (video) videoTrackCount else trackCount) <= 1 ->
+                message = if (video) tr("The only video track can't be deleted", "唯一のビデオトラックは削除できません")
+                else tr("The only audio track can't be deleted", "唯一のオーディオトラックは削除できません")
+            isLocked(video, track) ->
+                message = tr("$name is locked. Unlock it to delete it.", "${name}はロックされています。削除するにはロックを解除してください。")
+            else -> trackToDelete = TrackToDelete(video, track, clips.count { it.video == video && it.track == track })
+        }
+    }
+
+    fun cancelDeleteTrack() { trackToDelete = null }
+
+    /**
+     * Deletes the track waiting in [trackToDelete], like Resolve's Delete Track: its clips go, and the tracks
+     * above it move down one. A video or audio clip whose linked partner was on the deleted track stays,
+     * unlinked. Mute, lock and paste-track settings stay with their tracks. One undo step.
+     */
+    fun confirmDeleteTrack() {
+        val t = trackToDelete ?: return
+        trackToDelete = null
+        stop()
+        val video = t.video
+        val track = t.track
+        val removed = clips.filter { it.video == video && it.track == track }
+        val gone = removed.map { it.id }.toSet()
+        val brokenLinks = removed.mapNotNull { it.linkId }.toSet()
+        val kept = clips.filter { it.id !in gone }.map { c ->
+            var n = c
+            if (c.video == video && c.track > track) n = n.copy(track = c.track - 1)
+            // Unlink partners left on their own.
+            if (c.linkId != null && c.linkId in brokenLinks && clips.none { it.id !in gone && it.id != c.id && it.linkId == c.linkId }) {
+                n = n.copy(linkId = null)
+            }
+            n
+        }
+        fun shift(set: Set<Int>) = set.filter { it != track }.map { if (it > track) it - 1 else it }.toSet()
+        fun shiftTarget(t0: Int, count: Int) = (if (t0 > track) t0 - 1 else t0).coerceIn(0, count - 1)
+        pushUndo()
+        if (video) {
+            videoTrackCount--
+            lockedVideo = shift(lockedVideo)
+            targetVideo = shiftTarget(targetVideo, videoTrackCount)
+        } else {
+            trackCount--
+            lockedAudio = shift(lockedAudio)
+            mutedTracks = shift(mutedTracks)
+            targetAudio = shiftTarget(targetAudio, trackCount)
+        }
+        applyClips(kept)
     }
 
     /** Mute or unmute an audio track (like Resolve's M button). Affects playback and export. */

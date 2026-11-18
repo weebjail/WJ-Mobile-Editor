@@ -317,7 +317,10 @@ fun EditorScreen(vm: EditorViewModel) {
     }
 
     when (dialog) {
-        Dialog.NONE -> vm.editingMarker?.let { MarkerDialog(vm, it) }
+        Dialog.NONE -> {
+            vm.editingMarker?.let { MarkerDialog(vm, it) }
+            vm.trackToDelete?.let { DeleteTrackDialog(vm, it) }
+        }
         Dialog.SAVE -> SaveDialog(vm) { dialog = Dialog.NONE }
         Dialog.SETTINGS -> SettingsDialog(vm) { dialog = Dialog.NONE }
         Dialog.NEW_PROJECT -> NewProjectDialog(vm) { dialog = Dialog.NONE }
@@ -1144,4 +1147,26 @@ private fun BusyOverlay(text: String) {
             }
         }
     }
+}
+
+/** Asked after pressing and holding a track header. */
+@Composable
+private fun DeleteTrackDialog(vm: EditorViewModel, t: EditorViewModel.TrackToDelete) {
+    AlertDialog(
+        onDismissRequest = vm::cancelDeleteTrack,
+        title = { Text(tr("Delete track ${t.name}?", "トラック${t.name}を削除しますか？")) },
+        text = {
+            Text(
+                when (t.clipCount) {
+                    0 -> tr("The track is empty.", "このトラックは空です。")
+                    1 -> tr("The clip on it will be deleted too.", "トラック上のクリップも削除されます。")
+                    else -> tr("The ${t.clipCount} clips on it will be deleted too.", "トラック上の${t.clipCount}個のクリップも削除されます。")
+                } + tr(" You can undo this.", "元に戻すことができます。")
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = vm::confirmDeleteTrack) { Text(tr("Delete", "削除"), color = MaterialTheme.colorScheme.error) }
+        },
+        dismissButton = { TextButton(onClick = vm::cancelDeleteTrack) { Text(tr("Cancel", "キャンセル")) } },
+    )
 }
