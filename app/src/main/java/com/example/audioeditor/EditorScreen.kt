@@ -94,6 +94,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -241,12 +243,12 @@ fun EditorScreen(vm: EditorViewModel) {
             // Buttons here have their own sizes (small clipboard, large play / undo / redo), so the
             // row's minimum touch size is switched off and each button sets its size itself.
             ToolRow(minTouch = 0.dp) {
-                IconBtn(Icons.Default.ContentCut, tr("Cut clip", "クリップをカット"), size = 40.dp, iconSize = 20.dp, onClick = vm::cutSelected)
-                IconBtn(Icons.Default.ContentCopy, tr("Copy clip", "クリップをコピー"), size = 40.dp, iconSize = 20.dp, onClick = vm::copySelected)
+                IconBtn(Icons.Default.ContentCut, tr("Cut clip", "クリップをカット"), size = 40.dp, iconSize = 20.dp, visibleWidth = 15.dp, onClick = vm::cutSelected)
+                IconBtn(Icons.Default.ContentCopy, tr("Copy clip", "クリップをコピー"), size = 40.dp, iconSize = 20.dp, visibleWidth = 16.dp, onClick = vm::copySelected)
                 IconBtn(
                     Icons.Default.ContentPaste,
                     tr("Paste at the playhead (onto the paste tracks: tap a track name to choose)", "再生ヘッドに貼り付け（トラック名をタップして貼り付け先を選択）"),
-                    size = 40.dp, iconSize = 20.dp,
+                    size = 40.dp, iconSize = 20.dp, visibleWidth = 15.dp,
                     enabled = vm.canPaste, onClick = vm::paste,
                 )
                 MarkerColorBtn(vm)
@@ -258,7 +260,7 @@ fun EditorScreen(vm: EditorViewModel) {
                     )
                 }
                 Labeled(tr("Add marker (press again on a marker to edit it)", "マーカーを追加（マーカー上でもう一度押すと編集）")) {
-                    IconButton(onClick = vm::markerButton, modifier = Modifier.size(44.dp)) {
+                    IconButton(onClick = vm::markerButton, modifier = Modifier.size(44.dp).visibleWidth(14.dp)) {
                         Icon(
                             Icons.Default.Bookmark,
                             contentDescription = tr("Marker", "マーカー"),
@@ -266,8 +268,8 @@ fun EditorScreen(vm: EditorViewModel) {
                         )
                     }
                 }
-                IconBtn(Icons.AutoMirrored.Default.Undo, tr("Undo", "元に戻す"), size = 48.dp, iconSize = 28.dp, enabled = vm.canUndo, onClick = vm::undo)
-                IconBtn(Icons.AutoMirrored.Default.Redo, tr("Redo", "やり直す"), size = 48.dp, iconSize = 28.dp, enabled = vm.canRedo, onClick = vm::redo)
+                IconBtn(Icons.AutoMirrored.Default.Undo, tr("Undo", "元に戻す"), size = 48.dp, iconSize = 28.dp, visibleWidth = 23.dp, enabled = vm.canUndo, onClick = vm::undo)
+                IconBtn(Icons.AutoMirrored.Default.Redo, tr("Redo", "やり直す"), size = 48.dp, iconSize = 28.dp, visibleWidth = 23.dp, enabled = vm.canRedo, onClick = vm::redo)
             }
             // BOTTOM ROW 2: editing
             ToolRow {
@@ -978,7 +980,7 @@ private fun MarkerColorBtn(vm: EditorViewModel) {
     val label = tr("Marker colour: ", "マーカーの色: ") + vm.markerColor.label
     Box {
         Labeled(label) {
-            IconButton(onClick = { open = true }, modifier = Modifier.size(36.dp)) {
+            IconButton(onClick = { open = true }, modifier = Modifier.size(40.dp).visibleWidth(20.dp)) {
                 // A ring in the current colour, so it reads as "colour setting" rather than a marker itself.
                 Box(Modifier.size(20.dp).border(3.dp, Color(vm.markerColor.argb), CircleShape))
             }
@@ -1085,13 +1087,26 @@ private fun IconBtn(
     enabled: Boolean = true,
     size: Dp? = null,
     iconSize: Dp? = null,
+    visibleWidth: Dp? = null,
     onClick: () -> Unit,
 ) {
     Labeled(label) {
-        IconButton(onClick = onClick, enabled = enabled, modifier = size?.let { Modifier.size(it) } ?: Modifier) {
+        val m = (size?.let { Modifier.size(it) } ?: Modifier).let { mod -> visibleWidth?.let { mod.visibleWidth(it) } ?: mod }
+        IconButton(onClick = onClick, enabled = enabled, modifier = m) {
             Icon(icon, contentDescription = label, modifier = iconSize?.let { Modifier.size(it) } ?: Modifier)
         }
     }
+}
+
+/**
+ * Takes up only [width] in the row (the width of the icon you actually see), while the button keeps its
+ * full size and touch area, centred over that space. A row spaced evenly then has equal gaps between
+ * the visible icons, however much empty margin each button has around its icon.
+ */
+private fun Modifier.visibleWidth(width: Dp) = layout { measurable, constraints ->
+    val p = measurable.measure(constraints.copy(minWidth = 0, maxWidth = Constraints.Infinity))
+    val w = width.roundToPx()
+    layout(w, p.height) { p.place((w - p.width) / 2, 0) }
 }
 
 @Composable
