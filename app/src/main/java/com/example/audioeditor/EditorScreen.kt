@@ -101,6 +101,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -236,19 +237,21 @@ fun EditorScreen(vm: EditorViewModel) {
             if (gradeClip != null) GradePanel(vm, gradeClip) { lutLauncher.launch(arrayOf("*/*")) }
             else vm.fadeTarget?.let { FadePanel(vm, it) }
 
-            // BOTTOM ROW 1: transport and history
-            ToolRow {
-                IconBtn(Icons.AutoMirrored.Default.Undo, tr("Undo", "元に戻す"), enabled = vm.canUndo, onClick = vm::undo)
-                IconBtn(Icons.AutoMirrored.Default.Redo, tr("Redo", "やり直す"), enabled = vm.canRedo, onClick = vm::redo)
+            // BOTTOM ROW 1: clipboard, markers, transport and history.
+            // Buttons here have their own sizes (small clipboard, large play / undo / redo), so the
+            // row's minimum touch size is switched off and each button sets its size itself.
+            ToolRow(minTouch = 0.dp) {
+                IconBtn(Icons.Default.ContentCut, tr("Cut clip", "クリップをカット"), size = 40.dp, iconSize = 20.dp, onClick = vm::cutSelected)
+                IconBtn(Icons.Default.ContentCopy, tr("Copy clip", "クリップをコピー"), size = 40.dp, iconSize = 20.dp, onClick = vm::copySelected)
+                IconBtn(
+                    Icons.Default.ContentPaste,
+                    tr("Paste at the playhead (onto the paste tracks: tap a track name to choose)", "再生ヘッドに貼り付け（トラック名をタップして貼り付け先を選択）"),
+                    size = 40.dp, iconSize = 20.dp,
+                    enabled = vm.canPaste, onClick = vm::paste,
+                )
                 MarkerColorBtn(vm)
-                FilledIconButton(onClick = vm::togglePlay) {
-                    Icon(
-                        if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = if (vm.isPlaying) tr("Pause", "一時停止") else tr("Play", "再生"),
-                    )
-                }
                 Labeled(tr("Add marker (press again on a marker to edit it)", "マーカーを追加（マーカー上でもう一度押すと編集）")) {
-                    IconButton(onClick = vm::markerButton) {
+                    IconButton(onClick = vm::markerButton, modifier = Modifier.size(44.dp)) {
                         Icon(
                             Icons.Default.Bookmark,
                             contentDescription = tr("Marker", "マーカー"),
@@ -256,13 +259,15 @@ fun EditorScreen(vm: EditorViewModel) {
                         )
                     }
                 }
-                IconBtn(Icons.Default.ContentCut, tr("Cut clip", "クリップをカット"), onClick = vm::cutSelected)
-                IconBtn(Icons.Default.ContentCopy, tr("Copy clip", "クリップをコピー"), onClick = vm::copySelected)
-                IconBtn(
-                    Icons.Default.ContentPaste,
-                    tr("Paste at the playhead (onto the paste tracks: tap a track name to choose)", "再生ヘッドに貼り付け（トラック名をタップして貼り付け先を選択）"),
-                    enabled = vm.canPaste, onClick = vm::paste,
-                )
+                FilledIconButton(onClick = vm::togglePlay, modifier = Modifier.size(52.dp)) {
+                    Icon(
+                        if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = if (vm.isPlaying) tr("Pause", "一時停止") else tr("Play", "再生"),
+                        modifier = Modifier.size(30.dp),
+                    )
+                }
+                IconBtn(Icons.AutoMirrored.Default.Undo, tr("Undo", "元に戻す"), size = 48.dp, iconSize = 28.dp, enabled = vm.canUndo, onClick = vm::undo)
+                IconBtn(Icons.AutoMirrored.Default.Redo, tr("Redo", "やり直す"), size = 48.dp, iconSize = 28.dp, enabled = vm.canRedo, onClick = vm::redo)
             }
             // BOTTOM ROW 2: editing
             ToolRow {
@@ -973,7 +978,10 @@ private fun MarkerColorBtn(vm: EditorViewModel) {
     val label = tr("Marker colour: ", "マーカーの色: ") + vm.markerColor.label
     Box {
         Labeled(label) {
-            IconButton(onClick = { open = true }, modifier = Modifier.size(36.dp)) { Swatch(vm.markerColor, 18.dp) }
+            IconButton(onClick = { open = true }, modifier = Modifier.size(36.dp)) {
+                // A ring in the current colour, so it reads as "colour setting" rather than a marker itself.
+                Box(Modifier.size(20.dp).border(3.dp, Color(vm.markerColor.argb), CircleShape))
+            }
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             MarkerColor.entries.forEach { c ->
@@ -1042,9 +1050,13 @@ private fun ToggleBtn(icon: ImageVector, label: String, on: Boolean, onClick: ()
 
 /** A row of controls. Fixed rows spread their buttons evenly; the top row may scroll on very narrow screens. */
 @Composable
-private fun ToolRow(scrollable: Boolean = false, content: @Composable RowScope.() -> Unit) {
+private fun ToolRow(
+    scrollable: Boolean = false,
     // Fixed rows use slightly smaller (44dp) touch targets so eight buttons fit across a 360dp-wide phone.
-    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides if (scrollable) 48.dp else 44.dp) {
+    minTouch: Dp = if (scrollable) 48.dp else 44.dp,
+    content: @Composable RowScope.() -> Unit,
+) {
+    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides minTouch) {
         Row(
             Modifier.fillMaxWidth()
                 .let { if (scrollable) it.horizontalScroll(rememberScrollState()) else it }
@@ -1067,10 +1079,17 @@ private fun Labeled(label: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun IconBtn(icon: ImageVector, label: String, enabled: Boolean = true, onClick: () -> Unit) {
+private fun IconBtn(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean = true,
+    size: Dp? = null,
+    iconSize: Dp? = null,
+    onClick: () -> Unit,
+) {
     Labeled(label) {
-        IconButton(onClick = onClick, enabled = enabled) {
-            Icon(icon, contentDescription = label)
+        IconButton(onClick = onClick, enabled = enabled, modifier = size?.let { Modifier.size(it) } ?: Modifier) {
+            Icon(icon, contentDescription = label, modifier = iconSize?.let { Modifier.size(it) } ?: Modifier)
         }
     }
 }

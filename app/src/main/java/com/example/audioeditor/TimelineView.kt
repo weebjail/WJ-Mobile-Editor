@@ -65,7 +65,7 @@ private val TransitionFill = Color(0xFF15161A).copy(alpha = 0.55f)
 private val TransitionEdge = Color(0xFFDADDE5)
 private val MuteOn = Color(0xFFE0B03A)
 private val LockOn = Color(0xFFE0675A)
-private val TargetOn = Color(0xFFE8833A)
+private val TargetOn = Color(0xFFE1005F)
 private val LockShade =Color.Black.copy(alpha = 0.35f)
 private val VideoClipColor = Color(0xFF35507A)
 private val ClipColors = listOf(Color(0xFF2F7A5C), Color(0xFF3B5DA3), Color(0xFF7D4FA3), Color(0xFFA0683A))
@@ -433,7 +433,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
             }
             drawText(
                 textMeasurer, (if (video) "V" else "A") + (track + 1), Offset(gap * 2, top + 8f),
-                TextStyle(color = if (target) Color.Black else TextDim, fontSize = 11.sp, fontWeight = FontWeight.Bold),
+                TextStyle(color = if (target) Color.White else TextDim, fontSize = 11.sp, fontWeight = FontWeight.Bold),
             )
             val by = top + trackH - box - 8.dp.toPx()
             val locked = vm.isLocked(video, track)
