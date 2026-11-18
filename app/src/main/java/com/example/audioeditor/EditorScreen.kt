@@ -58,7 +58,6 @@ import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SaveAs
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material.icons.filled.VerticalSplit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
@@ -252,11 +251,11 @@ fun EditorScreen(vm: EditorViewModel) {
                     enabled = vm.canPaste, onClick = vm::paste,
                 )
                 MarkerColorBtn(vm)
-                FilledIconButton(onClick = vm::togglePlay, modifier = Modifier.size(52.dp)) {
+                FilledIconButton(onClick = vm::togglePlay, modifier = Modifier.size(56.dp)) {
                     Icon(
                         if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = if (vm.isPlaying) tr("Pause", "一時停止") else tr("Play", "再生"),
-                        modifier = Modifier.size(30.dp),
+                        modifier = Modifier.size(32.dp),
                     )
                 }
                 Labeled(tr("Add marker (press again on a marker to edit it)", "マーカーを追加（マーカー上でもう一度押すと編集）")) {
@@ -268,8 +267,8 @@ fun EditorScreen(vm: EditorViewModel) {
                         )
                     }
                 }
-                IconBtn(Icons.AutoMirrored.Default.Undo, tr("Undo", "元に戻す"), size = 48.dp, iconSize = 28.dp, visibleWidth = 23.dp, enabled = vm.canUndo, onClick = vm::undo)
-                IconBtn(Icons.AutoMirrored.Default.Redo, tr("Redo", "やり直す"), size = 48.dp, iconSize = 28.dp, visibleWidth = 23.dp, enabled = vm.canRedo, onClick = vm::redo)
+                IconBtn(Icons.AutoMirrored.Default.Undo, tr("Undo", "元に戻す"), size = 44.dp, iconSize = 26.dp, visibleWidth = 22.dp, enabled = vm.canUndo, onClick = vm::undo)
+                IconBtn(Icons.AutoMirrored.Default.Redo, tr("Redo", "やり直す"), size = 44.dp, iconSize = 26.dp, visibleWidth = 22.dp, enabled = vm.canRedo, onClick = vm::redo)
             }
             // BOTTOM ROW 2: editing
             ToolRow {
@@ -277,7 +276,7 @@ fun EditorScreen(vm: EditorViewModel) {
                 IconBtn(Icons.Default.Delete, tr("Delete clip", "クリップを削除")) { vm.deleteSelected(false) }
                 IconBtn(Icons.Default.FirstPage, tr("Ripple trim start to playhead", "始点を再生ヘッドまでリップルトリム"), onClick = vm::rippleTrimStart)
                 IconBtn(Icons.Default.LastPage, tr("Ripple trim end to playhead", "終点を再生ヘッドまでリップルトリム"), onClick = vm::rippleTrimEnd)
-                IconBtn(Icons.Default.VerticalSplit, tr("Split clip at playhead", "再生ヘッドでクリップを分割"), onClick = vm::cut)
+                IconBtn(BladeIcon, tr("Split clip at playhead", "再生ヘッドでクリップを分割"), onClick = vm::cut)
                 IconBtn(Icons.Default.JoinFull, tr("Crossfade", "クロスフェード"), onClick = vm::crossfade)
             }
         }
