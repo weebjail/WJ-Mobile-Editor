@@ -902,8 +902,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Pastes at the playhead onto the destination tracks, overwriting whatever is there, then moves the playhead
-     * to the end of the pasted clips (as Resolve does), so pasting again puts the next copy straight after.
+     * Pastes at the playhead onto the destination tracks, moving the clips after it along to make room (an insert,
+     * as Resolve does), then moves the playhead to the end of the pasted clips so pasting again goes straight after.
      */
     fun paste() {
         val copied = clipboard ?: run { message = tr("Copy or cut a clip first", "先にクリップをコピーまたはカットしてください"); return }
@@ -928,10 +928,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         // Each copy gets its own clip IDs and its own link, so it doesn't move together with the original.
         val links = copied.mapNotNull { it.linkId }.distinct().associateWith { newId() }
         val fresh = placed.map { it.copy(id = newId(), linkId = it.linkId?.let(links::get)) }
+        // Make room: everything from the playhead on moves right by the pasted length (a clip across the
+        // playhead is split), on every unlocked track if "ripple all tracks" is on, otherwise on the tracks
+        // pasted onto plus any tracks holding clips linked to those, so linked video and audio stay in sync.
+        val lanes = placed.map { it.video to it.track }.toMutableSet()
+        if (!rippleAllTracks) {
+            while (true) {
+                val linked = clips.filter { (it.video to it.track) in lanes && it.end > playhead }.mapNotNull { it.linkId }.toSet()
+                val more = clips.filter { it.linkId in linked }.map { it.video to it.track }.filter { it !in lanes }
+                if (more.isEmpty()) break
+                lanes += more
+            }
+        }
+        val affects: (Clip) -> Boolean = { onUnlockedTrack(it) && (rippleAllTracks || (it.video to it.track) in lanes) }
+        val room = TimelineOps.rippleInsertGap(clips, playhead, fresh.maxOf { it.end } - playhead, ::newId, affects)
         pushUndo()
         trackCount = maxOf(trackCount, needA)
         videoTrackCount = maxOf(videoTrackCount, needV)
-        applyClips(overwrite(clips, fresh))
+        applyClips(overwrite(room, fresh))
         val before = playhead
         playhead = fresh.maxOf { it.end }
         overrideSelectedId = null

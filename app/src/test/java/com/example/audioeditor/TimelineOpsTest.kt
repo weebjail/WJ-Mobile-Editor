@@ -165,4 +165,15 @@ class TimelineOpsTest {
         assertEquals("a_b_c", ProjectStore.safeName("a/b:c"))
         assertEquals("Untitled", ProjectStore.safeName("  ../  "))
     }
+
+    @Test fun rippleInsertGapSplitsAndPushesClipsRight() {
+        val a = Clip(1, 1, 0, 0, 0, 10 * sec)                    // across the insert point
+        val b = Clip(2, 1, 0, 12 * sec, 0, 5 * sec)              // after it
+        val other = Clip(3, 2, 1, 4 * sec, 0, 10 * sec)          // another track, not affected
+        val out = TimelineOps.rippleInsertGap(listOf(a, b, other), 4 * sec, 3 * sec, ::newId) { it.track == 0 }
+        val pieces = out.filter { it.sourceId == 1L }.sortedBy { it.start }
+        assertEquals(listOf(0L, 7 * sec, 15 * sec), pieces.map { it.start })   // left piece, right piece, b
+        assertEquals(4 * sec, pieces[1].sourceIn)                              // right piece continues the media
+        assertEquals(other, out.single { it.id == 3L })
+    }
 }

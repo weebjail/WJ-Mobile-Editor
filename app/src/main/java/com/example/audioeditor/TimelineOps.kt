@@ -80,6 +80,25 @@ object TimelineOps {
             .map { if (affects(it) && it.start >= to) it.copy(start = it.start - d) else it }
     }
 
+    /**
+     * Opens a gap [length] long at [at] on the clips [affects] accepts: a clip across [at] is split there, and
+     * everything from [at] on moves right (the opposite of [rippleRemoveRange]; used for insert-pasting).
+     */
+    fun rippleInsertGap(
+        clips: List<Clip>, at: Long, length: Long, newId: () -> Long, affects: (Clip) -> Boolean = { true },
+    ): List<Clip> {
+        if (length <= 0) return clips
+        var out = clips
+        val targets = out.filter { at > it.start && at < it.end && affects(it) }
+        for (t in targets) out = split(out, t, at, newId)
+        // The right-hand pieces of a linked video + audio become their own linked pair (as with a cut).
+        for (link in targets.mapNotNull { it.linkId }.toSet()) {
+            val fresh = newId()
+            out = out.map { if (it.linkId == link && it.start >= at && affects(it)) it.copy(linkId = fresh) else it }
+        }
+        return out.map { if (affects(it) && it.start >= at) it.copy(start = it.start + length) else it }
+    }
+
     /** Shortest a clip can be trimmed to by dragging its edge (one video frame at 25 fps). */
     const val MIN_TRIM_LENGTH = SAMPLE_RATE / 25L
 
