@@ -865,6 +865,79 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         commit(new)
     }
 
+    // ------------------------------------------------------------ Cut / copy / paste
+
+    /** Copied clips (a clip and anything linked to it). Cleared when another project is opened. */
+    private var clipboard by mutableStateOf<List<Clip>?>(null)
+    val canPaste: Boolean get() = clipboard != null
+
+    /**
+     * Paste destinations, like Resolve's destination track controls: pasted audio goes on [targetAudio] and
+     * video on [targetVideo] (tracks further down for clips copied from several tracks). Set from the track headers.
+     */
+    var targetAudio by mutableIntStateOf(0); private set
+    var targetVideo by mutableIntStateOf(0); private set
+
+    fun setTarget(video: Boolean, track: Int) {
+        if (video) targetVideo = track else targetAudio = track
+    }
+
+    private fun resetClipboard() { clipboard = null; targetAudio = 0; targetVideo = 0 }
+
+    fun copySelected() {
+        val sel = selectedClip ?: run { message = tr("Tap a clip to select it first", "先にクリップをタップして選択してください"); return }
+        clipboard = group(sel)
+        message = tr("Copied", "コピーしました")
+    }
+
+    /** Copies the selected clip, then removes it, leaving a gap (Resolve's Cut). */
+    fun cutSelected() {
+        val sel = selectedClip ?: run { message = tr("Tap a clip to select it first", "先にクリップをタップして選択してください"); return }
+        stop()
+        val members = group(sel)
+        clipboard = members
+        var new = clips
+        for (c in members) new = TimelineOps.delete(new, c)
+        commit(new)
+    }
+
+    /**
+     * Pastes at the playhead onto the destination tracks, overwriting whatever is there, then moves the playhead
+     * to the end of the pasted clips (as Resolve does), so pasting again puts the next copy straight after.
+     */
+    fun paste() {
+        val copied = clipboard ?: run { message = tr("Copy or cut a clip first", "先にクリップをコピーまたはカットしてください"); return }
+        stop()
+        val first = copied.minOf { it.start }
+        val minA = copied.filter { !it.video }.minOfOrNull { it.track } ?: 0
+        val minV = copied.filter { it.video }.minOfOrNull { it.track } ?: 0
+        val placed = copied.map { c ->
+            val track = if (c.video) targetVideo + c.track - minV else targetAudio + c.track - minA
+            c.copy(id = 0L, start = playhead + c.start - first, track = track)
+        }
+        val needA = placed.filter { !it.video }.maxOfOrNull { it.track + 1 } ?: 0
+        val needV = placed.filter { it.video }.maxOfOrNull { it.track + 1 } ?: 0
+        if (needA > MAX_AUDIO_TRACKS || needV > MAX_VIDEO_TRACKS) {
+            message = tr("There aren't enough tracks below the paste track", "貼り付け先のトラックの下に十分なトラックがありません")
+            return
+        }
+        if (placed.any { isLocked(it.video, it.track) }) {
+            message = tr("The paste track is locked. Unlock it or pick another one.", "貼り付け先のトラックがロックされています。ロックを解除するか別のトラックを選んでください。")
+            return
+        }
+        // Each copy gets its own clip IDs and its own link, so it doesn't move together with the original.
+        val links = copied.mapNotNull { it.linkId }.distinct().associateWith { newId() }
+        val fresh = placed.map { it.copy(id = newId(), linkId = it.linkId?.let(links::get)) }
+        pushUndo()
+        trackCount = maxOf(trackCount, needA)
+        videoTrackCount = maxOf(videoTrackCount, needV)
+        applyClips(overwrite(clips, fresh))
+        val before = playhead
+        playhead = fresh.maxOf { it.end }
+        overrideSelectedId = null
+        followPlayhead(before)
+    }
+
     fun crossfade() {
         stop()
         val t = fadeTarget ?: run { message = tr(
@@ -1392,6 +1465,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         .maxOrNull()?.plus(1) ?: 1L,
                 )
                 clearHistory()
+                resetClipboard()
                 applyClips(withCurve(loadedClips))
                 projectName = data.name
                 savedName = ProjectStore.safeName(name)
@@ -1420,6 +1494,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         timelineWidth = width
         timelineHeight = height
         clearHistory()
+        resetClipboard()
         sources = emptyMap()
         thumbnails = emptyMap()
         trackCount = 2

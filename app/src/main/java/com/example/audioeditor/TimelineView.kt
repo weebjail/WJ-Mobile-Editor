@@ -65,7 +65,8 @@ private val TransitionFill = Color(0xFF15161A).copy(alpha = 0.55f)
 private val TransitionEdge = Color(0xFFDADDE5)
 private val MuteOn = Color(0xFFE0B03A)
 private val LockOn = Color(0xFFE0675A)
-private val LockShade = Color.Black.copy(alpha = 0.35f)
+private val TargetOn = Color(0xFFE8833A)
+private val LockShade =Color.Black.copy(alpha = 0.35f)
 private val VideoClipColor = Color(0xFF35507A)
 private val ClipColors = listOf(Color(0xFF2F7A5C), Color(0xFF3B5DA3), Color(0xFF7D4FA3), Color(0xFFA0683A))
 private val RulerSteps = doubleArrayOf(
@@ -87,7 +88,8 @@ private val HeaderGap = 4.dp
  *  - press and drag a clip: move it (and anything linked to it) in time, or to another track of the same kind
  *  - press and drag a clip's edge: shorten or extend it
  *  - drag anywhere else: scroll.  Pinch with two fingers: zoom
- *  - track header (left edge): left half locks / unlocks the track, right half mutes / unmutes an audio track
+ *  - track header (left edge): tap the name (V1, A1…) to make it the paste track; below it, the left half
+ *    locks / unlocks the track and the right half mutes / unmutes an audio track
  *  Clips on locked tracks can't be selected or changed.
  */
 @Composable
@@ -226,8 +228,12 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                                 val lane = laneAt(down.position.y)
                                 if (lane in 0 until vm.laneCount) {
                                     val (video, track) = vm.laneKind(lane)
-                                    // Left half: lock button.  Right half: mute button (audio tracks only).
-                                    if (down.position.x < headerW / 2 || video) vm.toggleLock(video, track)
+                                    val laneTop = rulerH + lane * trackH - scrollY
+                                    val buttonsTop = laneTop + trackH - HeaderButton.toPx() - 12.dp.toPx()
+                                    // Track name (top): make it the paste track.  Below it, left half: lock button,
+                                    // right half: mute button (audio tracks only).
+                                    if (down.position.y < buttonsTop) vm.setTarget(video, track)
+                                    else if (down.position.x < headerW / 2 || video) vm.toggleLock(video, track)
                                     else vm.toggleMute(track)
                                 }
                             }
@@ -402,9 +408,14 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
         for (lane in 0 until vm.laneCount) {
             val top = rulerH + lane * trackH - scrollY
             val (video, track) = vm.laneKind(lane)
+            // The paste track for each kind is highlighted, like Resolve's destination track control.
+            val target = track == if (video) vm.targetVideo else vm.targetAudio
+            if (target) {
+                drawRoundRect(TargetOn, Offset(gap, top + 4f), Size(headerW - gap * 2, 18.dp.toPx()), CornerRadius(6f))
+            }
             drawText(
                 textMeasurer, (if (video) "V" else "A") + (track + 1), Offset(gap * 2, top + 8f),
-                TextStyle(color = TextDim, fontSize = 11.sp, fontWeight = FontWeight.Bold),
+                TextStyle(color = if (target) Color.Black else TextDim, fontSize = 11.sp, fontWeight = FontWeight.Bold),
             )
             val by = top + trackH - box - 8.dp.toPx()
             val locked = vm.isLocked(video, track)

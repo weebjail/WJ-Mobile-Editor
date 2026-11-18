@@ -33,7 +33,9 @@ import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.FirstPage
@@ -56,8 +58,7 @@ import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SaveAs
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material.icons.filled.ZoomIn
-import androidx.compose.material.icons.filled.ZoomOut
+import androidx.compose.material.icons.filled.VerticalSplit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
@@ -70,6 +71,7 @@ import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.PlainTooltip
@@ -81,6 +83,7 @@ import androidx.compose.material3.TooltipBox
 import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.getValue
@@ -253,8 +256,13 @@ fun EditorScreen(vm: EditorViewModel) {
                         )
                     }
                 }
-                IconBtn(Icons.Default.ZoomOut, tr("Zoom out", "縮小")) { vm.zoom(0.67f, vm.viewWidthPx / 2) }
-                IconBtn(Icons.Default.ZoomIn, tr("Zoom in", "拡大")) { vm.zoom(1.5f, vm.viewWidthPx / 2) }
+                IconBtn(Icons.Default.ContentCut, tr("Cut clip", "クリップをカット"), onClick = vm::cutSelected)
+                IconBtn(Icons.Default.ContentCopy, tr("Copy clip", "クリップをコピー"), onClick = vm::copySelected)
+                IconBtn(
+                    Icons.Default.ContentPaste,
+                    tr("Paste at the playhead (onto the paste tracks: tap a track name to choose)", "再生ヘッドに貼り付け（トラック名をタップして貼り付け先を選択）"),
+                    enabled = vm.canPaste, onClick = vm::paste,
+                )
             }
             // BOTTOM ROW 2: editing
             ToolRow {
@@ -262,7 +270,7 @@ fun EditorScreen(vm: EditorViewModel) {
                 IconBtn(Icons.Default.Delete, tr("Delete clip", "クリップを削除")) { vm.deleteSelected(false) }
                 IconBtn(Icons.Default.FirstPage, tr("Ripple trim start to playhead", "始点を再生ヘッドまでリップルトリム"), onClick = vm::rippleTrimStart)
                 IconBtn(Icons.Default.LastPage, tr("Ripple trim end to playhead", "終点を再生ヘッドまでリップルトリム"), onClick = vm::rippleTrimEnd)
-                IconBtn(Icons.Default.ContentCut, tr("Cut at playhead", "再生ヘッドでカット"), onClick = vm::cut)
+                IconBtn(Icons.Default.VerticalSplit, tr("Split clip at playhead", "再生ヘッドでクリップを分割"), onClick = vm::cut)
                 IconBtn(Icons.Default.JoinFull, tr("Crossfade", "クロスフェード"), onClick = vm::crossfade)
             }
         }
@@ -1027,14 +1035,17 @@ private fun ToggleBtn(icon: ImageVector, label: String, on: Boolean, onClick: ()
 /** A row of controls. Fixed rows spread their buttons evenly; the top row may scroll on very narrow screens. */
 @Composable
 private fun ToolRow(scrollable: Boolean = false, content: @Composable RowScope.() -> Unit) {
-    Row(
-        Modifier.fillMaxWidth()
-            .let { if (scrollable) it.horizontalScroll(rememberScrollState()) else it }
-            .padding(horizontal = 4.dp, vertical = 2.dp),
-        horizontalArrangement = if (scrollable) Arrangement.spacedBy(2.dp) else Arrangement.SpaceEvenly,
-        verticalAlignment = Alignment.CenterVertically,
-        content = content,
-    )
+    // Fixed rows use slightly smaller (44dp) touch targets so eight buttons fit across a 360dp-wide phone.
+    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides if (scrollable) 48.dp else 44.dp) {
+        Row(
+            Modifier.fillMaxWidth()
+                .let { if (scrollable) it.horizontalScroll(rememberScrollState()) else it }
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            horizontalArrangement = if (scrollable) Arrangement.spacedBy(2.dp) else Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+            content = content,
+        )
+    }
 }
 
 /** Long-pressing any toolbar icon shows what it does. */
