@@ -1078,7 +1078,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Colour for new markers, chosen with the button beside play (remembered between sessions). */
     var markerColor by mutableStateOf(
-        MarkerColor.entries.find { it.name == prefs.getString(KEY_MARKER_COLOR, null) } ?: MarkerColor.BLUE
+        MarkerColor.fromName(prefs.getString(KEY_MARKER_COLOR, null))
     ); private set
 
     fun updateMarkerColor(c: MarkerColor) {

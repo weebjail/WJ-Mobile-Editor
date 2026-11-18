@@ -276,7 +276,7 @@ object ProjectStore {
             Marker(
                 id = o.getLong("id"),
                 frame = o.getLong("frame").coerceAtLeast(0L),
-                color = MarkerColor.entries.find { it.name == o.optString("color") } ?: MarkerColor.BLUE,
+                color = MarkerColor.fromName(o.optString("color")),
                 name = o.optString("name", ""),
                 note = o.optString("note", ""),
             )

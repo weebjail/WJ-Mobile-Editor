@@ -1017,8 +1017,8 @@ private fun MarkerDialog(vm: EditorViewModel, e: EditorViewModel.EditingMarker) 
                 OutlinedTextField(name, { name = it }, label = { Text(tr("Name", "名前")) }, singleLine = true)
                 OutlinedTextField(note, { note = it }, label = { Text(tr("Notes", "メモ")) }, minLines = 2)
                 Text(tr("Colour: ", "色: ") + color.label, style = MaterialTheme.typography.titleSmall)
-                // Two rows of eight, Resolve's order.
-                MarkerColor.entries.chunked(8).forEach { row ->
+                // One row of seven, in rainbow order.
+                MarkerColor.entries.chunked(7).forEach { row ->
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         row.forEach { c ->
                             Box(Modifier.clickable { color = c }.padding(2.dp)) { Swatch(c, 24.dp, selected = c == color) }

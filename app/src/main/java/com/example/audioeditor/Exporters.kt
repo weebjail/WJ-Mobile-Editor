@@ -303,7 +303,7 @@ object Exporters {
         fun marker(m: Marker, at: Long) =
             """{"OTIO_SCHEMA": "Marker.2", "name": ${js(m.name)}, "color": "${m.color.otio}", "comment": ${js(m.note)}, """ +
                 """"marked_range": ${range(at, 1)}, """ +
-                """"metadata": {"Resolve_OTIO": {"Color": ${js(m.color.en)}, "Keywords": [], "Note": ${js(m.note)}}}}"""
+                """"metadata": {"Resolve_OTIO": {"Color": ${js(m.color.resolve)}, "Keywords": [], "Note": ${js(m.note)}}}}"""
 
         fun gap(dur: Long) =
             """{"OTIO_SCHEMA": "Gap.1", "name": "", "source_range": ${range(0, dur)}, "effects": [], "markers": [], "metadata": {}}"""

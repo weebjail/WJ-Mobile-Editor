@@ -117,28 +117,32 @@ fun Clip.withValidFades(): Clip {
 }
 
 /**
- * DaVinci Resolve's marker colours, in its own order. [otio] is the nearest OpenTimelineIO marker colour, which is
- * what Resolve reads and writes in .otio files.
+ * Marker colours. [resolve] is the name Resolve uses for the nearest of its own marker colours
+ * (Resolve has no orange or magenta, so those come in as Sand and Fuchsia); [otio] is the OTIO colour.
  */
-enum class MarkerColor(val argb: Long, val en: String, val ja: String, val otio: String) {
-    BLUE(0xFF2D8CEB, "Blue", "ブルー", "BLUE"),
-    CYAN(0xFF2EC4D6, "Cyan", "シアン", "CYAN"),
-    GREEN(0xFF3BB54A, "Green", "グリーン", "GREEN"),
-    YELLOW(0xFFF2C94C, "Yellow", "イエロー", "YELLOW"),
-    RED(0xFFE5483B, "Red", "レッド", "RED"),
-    PINK(0xFFF07BB6, "Pink", "ピンク", "PINK"),
-    PURPLE(0xFF9B59D0, "Purple", "パープル", "PURPLE"),
-    FUCHSIA(0xFFD0359B, "Fuchsia", "フクシア", "MAGENTA"),
-    ROSE(0xFFE8A0A8, "Rose", "ローズ", "PINK"),
-    LAVENDER(0xFFB9A6E0, "Lavender", "ラベンダー", "PURPLE"),
-    SKY(0xFF8FD3F4, "Sky", "スカイ", "CYAN"),
-    MINT(0xFF8EE0B5, "Mint", "ミント", "GREEN"),
-    LEMON(0xFFEFEB7A, "Lemon", "レモン", "YELLOW"),
-    SAND(0xFFD9B98C, "Sand", "サンド", "ORANGE"),
-    COCOA(0xFF8A5A3C, "Cocoa", "ココア", "ORANGE"),
-    CREAM(0xFFF4EBD2, "Cream", "クリーム", "WHITE");
+enum class MarkerColor(val argb: Long, val en: String, val ja: String, val otio: String, val resolve: String) {
+    RED(0xFFE5483B, "Red", "レッド", "RED", "Red"),
+    ORANGE(0xFFF08A24, "Orange", "オレンジ", "ORANGE", "Sand"),
+    YELLOW(0xFFF2C94C, "Yellow", "イエロー", "YELLOW", "Yellow"),
+    GREEN(0xFF3BB54A, "Green", "グリーン", "GREEN", "Green"),
+    BLUE(0xFF2D8CEB, "Blue", "ブルー", "BLUE", "Blue"),
+    PURPLE(0xFF9B59D0, "Purple", "パープル", "PURPLE", "Purple"),
+    MAGENTA(0xFFE1005F, "Magenta", "マゼンタ", "MAGENTA", "Fuchsia");
 
     val label: String get() = tr(en, ja)
+
+    companion object {
+        /** Reads a saved colour name, including the older Resolve-style colours, falling back to blue. */
+        fun fromName(name: String?): MarkerColor = when (name) {
+            "CYAN", "SKY" -> BLUE
+            "PINK", "ROSE", "FUCHSIA" -> MAGENTA
+            "LAVENDER" -> PURPLE
+            "MINT" -> GREEN
+            "LEMON", "CREAM" -> YELLOW
+            "SAND", "COCOA" -> ORANGE
+            else -> entries.find { it.name == name } ?: BLUE
+        }
+    }
 }
 
 /** A timeline marker, like Resolve's: a coloured flag at one point, with an optional name and note. */
