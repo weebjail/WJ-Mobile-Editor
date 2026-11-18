@@ -251,7 +251,7 @@ fun EditorScreen(vm: EditorViewModel) {
                     enabled = vm.canPaste, onClick = vm::paste,
                 )
                 MarkerColorBtn(vm)
-                FilledIconButton(onClick = vm::togglePlay, modifier = Modifier.size(52.dp)) {
+                FilledIconButton(onClick = vm::togglePlay, modifier = Modifier.size(52.dp).visibleWidth(52.dp, leftExtra = 8.dp)) {
                     Icon(
                         if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = if (vm.isPlaying) tr("Pause", "一時停止") else tr("Play", "再生"),
@@ -267,8 +267,8 @@ fun EditorScreen(vm: EditorViewModel) {
                         )
                     }
                 }
-                IconBtn(Icons.AutoMirrored.Default.Undo, tr("Undo", "元に戻す"), size = 44.dp, iconSize = 26.dp, visibleWidth = 22.dp, enabled = vm.canUndo, onClick = vm::undo)
-                IconBtn(Icons.AutoMirrored.Default.Redo, tr("Redo", "やり直す"), size = 44.dp, iconSize = 26.dp, visibleWidth = 22.dp, enabled = vm.canRedo, onClick = vm::redo)
+                IconBtn(Icons.AutoMirrored.Default.Undo, tr("Undo", "元に戻す"), size = 44.dp, iconSize = 26.dp, visibleWidth = 28.dp, enabled = vm.canUndo, onClick = vm::undo)
+                IconBtn(Icons.AutoMirrored.Default.Redo, tr("Redo", "やり直す"), size = 44.dp, iconSize = 26.dp, visibleWidth = 28.dp, enabled = vm.canRedo, onClick = vm::redo)
             }
             // BOTTOM ROW 2: editing
             ToolRow {
@@ -1100,12 +1100,15 @@ private fun IconBtn(
 /**
  * Takes up only [width] in the row (the width of the icon you actually see), while the button keeps its
  * full size and touch area, centred over that space. A row spaced evenly then has equal gaps between
- * the visible icons, however much empty margin each button has around its icon.
+ * the visible icons, however much empty margin each button has around its icon. [leftExtra] adds space
+ * on the left only, for icons that look closer to their left-hand neighbour than the numbers say.
  */
-private fun Modifier.visibleWidth(width: Dp) = layout { measurable, constraints ->
+private fun Modifier.visibleWidth(width: Dp, leftExtra: Dp = 0.dp) = layout { measurable, constraints ->
     val p = measurable.measure(constraints.copy(minWidth = 0, maxWidth = Constraints.Infinity))
-    val w = width.roundToPx()
-    layout(w, p.height) { p.place((w - p.width) / 2, 0) }
+    val extra = leftExtra.roundToPx()
+    val w = width.roundToPx() + extra
+    // Any extra space goes on the left, nudging the button right.
+    layout(w, p.height) { p.place(extra + (w - extra - p.width) / 2, 0) }
 }
 
 @Composable
