@@ -251,11 +251,11 @@ fun EditorScreen(vm: EditorViewModel) {
                     enabled = vm.canPaste, onClick = vm::paste,
                 )
                 MarkerColorBtn(vm)
-                FilledIconButton(onClick = vm::togglePlay, modifier = Modifier.size(56.dp)) {
+                FilledIconButton(onClick = vm::togglePlay, modifier = Modifier.size(52.dp)) {
                     Icon(
                         if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = if (vm.isPlaying) tr("Pause", "一時停止") else tr("Play", "再生"),
-                        modifier = Modifier.size(32.dp),
+                        modifier = Modifier.size(30.dp),
                     )
                 }
                 Labeled(tr("Add marker (press again on a marker to edit it)", "マーカーを追加（マーカー上でもう一度押すと編集）")) {
