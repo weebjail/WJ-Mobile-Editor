@@ -65,7 +65,7 @@ private val TransitionFill = Color(0xFF15161A).copy(alpha = 0.55f)
 private val TransitionEdge = Color(0xFFDADDE5)
 private val MuteOn = Color(0xFFE0B03A)
 private val LockOn = Color(0xFFE0675A)
-private val TargetOn = Color(0xFFE1005F)
+private val TargetOn = Color(0x80E1005F) // #E1005F at 50% opacity
 private val LockShade =Color.Black.copy(alpha = 0.35f)
 private val VideoClipColor = Color(0xFF35507A)
 private val ClipColors = listOf(Color(0xFF2F7A5C), Color(0xFF3B5DA3), Color(0xFF7D4FA3), Color(0xFFA0683A))
