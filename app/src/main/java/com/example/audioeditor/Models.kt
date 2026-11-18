@@ -72,6 +72,8 @@ data class Clip(
     val video: Boolean = false,
     val linkId: Long? = null,
     val grade: Grade = Grade(),   // colour (video clips only)
+    /** Clip markers, like Resolve's: [Marker.frame] is a position in the source media, so they move with the clip. */
+    val markers: List<Marker> = emptyList(),
 ) {
     val end: Long get() = start + length
 
@@ -89,6 +91,10 @@ data class Clip(
     }
 
     fun sameLane(o: Clip) = video == o.video && track == o.track
+
+    /** The clip's markers that fall inside its trimmed part, with their timeline positions. */
+    fun visibleMarkers(): List<Pair<Marker, Long>> =
+        markers.filter { it.frame >= sourceIn && it.frame < sourceIn + length }.map { it to start + (it.frame - sourceIn) }
 }
 
 /**

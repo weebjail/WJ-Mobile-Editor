@@ -989,15 +989,23 @@ private fun MarkerColorBtn(vm: EditorViewModel) {
 
 /** Opened by pressing the marker button on a marker, as in Resolve: name, note, colour, or delete it. */
 @Composable
-private fun MarkerDialog(vm: EditorViewModel, marker: Marker) {
-    var name by remember(marker.id) { mutableStateOf(marker.name) }
-    var note by remember(marker.id) { mutableStateOf(marker.note) }
-    var color by remember(marker.id) { mutableStateOf(marker.color) }
+private fun MarkerDialog(vm: EditorViewModel, e: EditorViewModel.EditingMarker) {
+    val marker = e.marker
+    var name by remember(e) { mutableStateOf(marker.name) }
+    var note by remember(e) { mutableStateOf(marker.note) }
+    var color by remember(e) { mutableStateOf(marker.color) }
+    // Clip markers say which clip they're on.
+    val clipName = e.clipId?.let { id -> vm.clips.find { it.id == id }?.let { vm.sources[it.sourceId]?.name } }
     AlertDialog(
         onDismissRequest = vm::closeMarker,
-        title = { Text(tr("Marker at ", "マーカー ") + formatTime(marker.frame)) },
+        title = { Text(tr("Marker at ", "マーカー ") + formatTime(e.timelineFrame)) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    clipName?.let { tr("On clip “$it”", "クリップ「$it」上") } ?: tr("On the timeline", "タイムライン上"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 OutlinedTextField(name, { name = it }, label = { Text(tr("Name", "名前")) }, singleLine = true)
                 OutlinedTextField(note, { note = it }, label = { Text(tr("Notes", "メモ")) }, minLines = 2)
                 Text(tr("Colour: ", "色: ") + color.label, style = MaterialTheme.typography.titleSmall)
@@ -1012,11 +1020,11 @@ private fun MarkerDialog(vm: EditorViewModel, marker: Marker) {
             }
         },
         confirmButton = {
-            TextButton(onClick = { vm.updateMarker(marker.copy(name = name, note = note, color = color)) }) { Text(tr("Done", "完了")) }
+            TextButton(onClick = { vm.updateMarker(e, marker.copy(name = name, note = note, color = color)) }) { Text(tr("Done", "完了")) }
         },
         dismissButton = {
             Row {
-                TextButton(onClick = { vm.deleteMarker(marker.id) }) { Text(tr("Delete", "削除"), color = MaterialTheme.colorScheme.error) }
+                TextButton(onClick = { vm.deleteMarker(e) }) { Text(tr("Delete", "削除"), color = MaterialTheme.colorScheme.error) }
                 TextButton(onClick = vm::closeMarker) { Text(tr("Cancel", "キャンセル")) }
             }
         },

@@ -19,6 +19,7 @@ data class SavedClip(
     val video: Boolean = false,
     val linkId: Long? = null,
     val grade: Grade = Grade(),
+    val markers: List<Marker> = emptyList(),
 )
 
 data class SavedSource(
@@ -156,19 +157,12 @@ object ProjectStore {
                         put("highlights", c.grade.highlights.toDouble())
                         put("shadows", c.grade.shadows.toDouble())
                     })
+                    if (c.markers.isNotEmpty()) put("markers", markersJson(c.markers))
                 })
             }
             put("clips", clipsArray)
 
-            put("markers", JSONArray().apply {
-                for (m in data.markers) put(JSONObject().apply {
-                    put("id", m.id)
-                    put("frame", m.frame)
-                    put("color", m.color.name)
-                    put("name", m.name)
-                    put("note", m.note)
-                })
-            })
+            put("markers", markersJson(data.markers))
         }
         // Write to a temp file first so a crash mid-save can't destroy the previous version.
         val target = file(context, data.name)
@@ -231,21 +225,10 @@ object ProjectStore {
                         shadows = g.optDouble("shadows", 0.0).toFloat(),
                     )
                 } ?: Grade(),
+                markers = markersFrom(o.optJSONArray("markers")),
             )
         }
-        val markers = mutableListOf<Marker>()
-        json.optJSONArray("markers")?.let { a ->
-            for (i in 0 until a.length()) {
-                val o = a.getJSONObject(i)
-                markers += Marker(
-                    id = o.getLong("id"),
-                    frame = o.getLong("frame").coerceAtLeast(0L),
-                    color = MarkerColor.entries.find { it.name == o.optString("color") } ?: MarkerColor.BLUE,
-                    name = o.optString("name", ""),
-                    note = o.optString("note", ""),
-                )
-            }
-        }
+        val markers = markersFrom(json.optJSONArray("markers"))
         return ProjectData(
             name, trackCount, playhead, sourcesList, clipsList, videoTrackCount, muted,
             markers = markers,
@@ -274,5 +257,29 @@ object ProjectStore {
     fun loadView(context: Context, name: String): ViewState? {
         val parts = views(context).getString(safeName(name), null)?.split(',') ?: return null
         return runCatching { ViewState(parts[0].toLong(), parts[1].toDouble(), parts[2].toDouble()) }.getOrNull()
+    }
+
+    private fun markersJson(list: List<Marker>) = JSONArray().apply {
+        for (m in list) put(JSONObject().apply {
+            put("id", m.id)
+            put("frame", m.frame)
+            put("color", m.color.name)
+            put("name", m.name)
+            put("note", m.note)
+        })
+    }
+
+    private fun markersFrom(a: JSONArray?): List<Marker> {
+        a ?: return emptyList()
+        return (0 until a.length()).map { i ->
+            val o = a.getJSONObject(i)
+            Marker(
+                id = o.getLong("id"),
+                frame = o.getLong("frame").coerceAtLeast(0L),
+                color = MarkerColor.entries.find { it.name == o.optString("color") } ?: MarkerColor.BLUE,
+                name = o.optString("name", ""),
+                note = o.optString("note", ""),
+            )
+        }
     }
 }

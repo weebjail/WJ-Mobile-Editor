@@ -750,7 +750,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val edges = ArrayList<Long>(clips.size * 2 + 1)
             edges += 0L
             for (c in clips) { edges += c.start; edges += c.end }
-            for (m in markers) edges += m.frame
+            edges += markerFrames()
             val (s, l) = TimelineOps.snap(f, 0L, edges, (snapThresholdPx * samplesPerPx).toLong())
             f = s
             line = l
@@ -1086,40 +1086,60 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putString(KEY_MARKER_COLOR, c.name).apply()
     }
 
-    /** The marker being edited in the marker dialog. */
-    var editingMarker by mutableStateOf<Marker?>(null); private set
+    /** A marker open in the marker dialog: on clip [clipId] (null = a timeline marker), at [timelineFrame]. */
+    class EditingMarker(val marker: Marker, val clipId: Long?, val timelineFrame: Long)
 
-    /** A marker at the playhead (within a few pixels), if there is one. */
-    private fun markerAtPlayhead(): Marker? {
+    var editingMarker by mutableStateOf<EditingMarker?>(null); private set
+
+    /** Timeline positions of every marker that can be seen: timeline markers, and clip markers inside their clip. */
+    private fun markerFrames(skipClips: Set<Long> = emptySet()): List<Long> =
+        markers.map { it.frame } + clips.filter { it.id !in skipClips }.flatMap { c -> c.visibleMarkers().map { it.second } }
+
+    /** The marker nearest the playhead (within a few pixels), timeline or clip, if there is one. */
+    private fun markerAtPlayhead(): EditingMarker? {
         val tolerance = (samplesPerPx * 3).toLong()
-        return markers.filter { abs(it.frame - playhead) <= tolerance }.minByOrNull { abs(it.frame - playhead) }
+        val all = markers.map { EditingMarker(it, null, it.frame) } +
+            clips.flatMap { c -> c.visibleMarkers().map { (m, at) -> EditingMarker(m, c.id, at) } }
+        return all.filter { abs(it.timelineFrame - playhead) <= tolerance }.minByOrNull { abs(it.timelineFrame - playhead) }
     }
 
     /**
-     * The marker button, as in Resolve: adds a marker at the playhead in the current colour. Pressed again on a
-     * marker (while stopped) it opens that marker so it can be named, noted, recoloured or deleted.
-     * During playback it just keeps adding markers.
+     * The marker button, as in Resolve: adds a marker at the playhead in the current colour, on the selected clip
+     * (or the clip under the playhead, if the selected one isn't there). With no clip at the playhead it becomes a
+     * timeline marker. Pressed again on a marker (while stopped) it opens that marker so it can be named, noted,
+     * recoloured or deleted. During playback it just keeps adding markers.
      */
     fun markerButton() {
         if (!isPlaying) markerAtPlayhead()?.let { editingMarker = it; return }
-        val frame = if (playbackRunning) player.position() else playhead
+        val at = if (playbackRunning) player.position() else playhead
+        val over = { c: Clip -> at >= c.start && at < c.end }
+        val clip = selectedClip?.takeIf(over) ?: clipUnderPlayhead(over)
         pushUndo()
-        markers = (markers + Marker(newId(), frame, markerColor)).sortedBy { it.frame }
+        if (clip == null) {
+            markers = (markers + Marker(newId(), at, markerColor)).sortedBy { it.frame }
+        } else {
+            val m = Marker(newId(), clip.sourceIn + (at - clip.start), markerColor)
+            applyClips(clips.map { if (it.id == clip.id) it.copy(markers = (it.markers + m).sortedBy { x -> x.frame }) else it })
+        }
     }
 
-    fun updateMarker(m: Marker) {
-        editingMarker = null
-        val old = markers.find { it.id == m.id } ?: return
-        if (old == m) return
-        pushUndo()
-        markers = markers.map { if (it.id == m.id) m else it }
+    /** Applies [change] to the marker list that holds [e]'s marker (its clip's, or the timeline's). */
+    private fun changeMarkers(e: EditingMarker, change: (List<Marker>) -> List<Marker>) {
+        if (e.clipId == null) markers = change(markers)
+        else applyClips(clips.map { if (it.id == e.clipId) it.copy(markers = change(it.markers)) else it })
     }
 
-    fun deleteMarker(id: Long) {
+    fun updateMarker(e: EditingMarker, m: Marker) {
         editingMarker = null
-        if (markers.none { it.id == id }) return
+        if (e.marker == m) return
         pushUndo()
-        markers = markers.filter { it.id != id }
+        changeMarkers(e) { list -> list.map { if (it.id == m.id) m else it } }
+    }
+
+    fun deleteMarker(e: EditingMarker) {
+        editingMarker = null
+        pushUndo()
+        changeMarkers(e) { list -> list.filter { it.id != e.marker.id } }
     }
 
     fun closeMarker() { editingMarker = null }
@@ -1150,7 +1170,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             edges += 0L
             edges += playhead
             for (c in clips) if (c.id !in ids) { edges += c.start; edges += c.end }
-            for (m in markers) edges += m.frame
+            edges += markerFrames(ids)
             val (s, l) = TimelineOps.snap(start, lead.length, edges, (snapThresholdPx * samplesPerPx).toLong())
             start = s
             line = l
@@ -1218,7 +1238,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             edges += 0L
             edges += playhead
             for (c in clips) if (c.id !in ids) { edges += c.start; edges += c.end }
-            for (m in markers) edges += m.frame
+            edges += markerFrames(ids)
             val (s, l) = TimelineOps.snap(edge + d, 0L, edges, (snapThresholdPx * samplesPerPx).toLong())
             if (l != null && s - edge in trimRange) { d = s - edge; line = l }
         }
@@ -1343,7 +1363,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             SavedClip(
                 it.id, it.sourceId, it.track, it.start, it.sourceIn, it.length,
                 it.fadeIn.frames, it.fadeIn.curve.name, it.fadeOut.frames, it.fadeOut.curve.name,
-                it.video, it.linkId, it.grade,
+                it.video, it.linkId, it.grade, it.markers,
             )
         },
         videoTrackCount, mutedTracks,
@@ -1450,6 +1470,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         video = c.video,
                         linkId = c.linkId,
                         grade = c.grade,
+                        markers = c.markers,
                     )
                 }
                 sources = loaded
@@ -1475,7 +1496,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 // New clips must never reuse an ID from the loaded project.
                 nextId = maxOf(
                     nextId,
-                    (loadedClips.flatMap { listOfNotNull(it.id, it.linkId) } + data.sources.map { it.id } + data.markers.map { it.id })
+                    (loadedClips.flatMap { listOfNotNull(it.id, it.linkId) } + data.sources.map { it.id } + data.markers.map { it.id } +
+                        loadedClips.flatMap { c -> c.markers.map { it.id } })
                         .maxOrNull()?.plus(1) ?: 1L,
                 )
                 clearHistory()

@@ -341,6 +341,24 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     overflow = TextOverflow.Ellipsis, maxLines = 1, size = Size(textW, ch / 2),
                 )
             }
+            // Clip markers: small flags along the top of the clip, hanging from its top edge.
+            val cm = c.visibleMarkers()
+            if (cm.isNotEmpty()) {
+                val fw = 5.dp.toPx()
+                val fh = 12.dp.toPx()
+                clipRect(max(x0, headerW), top, min(x1, w), top + ch) {
+                    for ((m, at) in cm) {
+                        val mx = xOf(at)
+                        val flag = Path().apply {
+                            moveTo(mx - fw, top); lineTo(mx + fw, top); lineTo(mx + fw, top + fh - fw)
+                            lineTo(mx, top + fh); lineTo(mx - fw, top + fh - fw); close()
+                        }
+                        drawPath(flag, Color(m.color.argb))
+                        drawPath(flag, Color.Black.copy(alpha = 0.5f), style = Stroke(width = 1f))
+                    }
+                }
+            }
+
             if (c.id in selected) {
                 drawRoundRect(
                     Color.White, Offset(x0, top), Size(x1 - x0, ch), CornerRadius(10f),

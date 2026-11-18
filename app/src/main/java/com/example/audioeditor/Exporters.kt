@@ -299,6 +299,12 @@ object Exporters {
             """{"OTIO_SCHEMA": "Transition.1", "name": ${js(if (curve == FadeCurve.LINEAR) "Cross Fade (0dB)" else "Cross Fade (+3dB)")}, """ +
                 """"transition_type": "SMPTE_Dissolve", "in_offset": ${time(inOffset)}, "out_offset": ${time(outOffset)}, "metadata": {}}"""
 
+        /** A marker one frame long at video frame [at], as Resolve writes them. */
+        fun marker(m: Marker, at: Long) =
+            """{"OTIO_SCHEMA": "Marker.2", "name": ${js(m.name)}, "color": "${m.color.otio}", "comment": ${js(m.note)}, """ +
+                """"marked_range": ${range(at, 1)}, """ +
+                """"metadata": {"Resolve_OTIO": {"Color": ${js(m.color.en)}, "Keywords": [], "Note": ${js(m.note)}}}}"""
+
         fun gap(dur: Long) =
             """{"OTIO_SCHEMA": "Gap.1", "name": "", "source_range": ${range(0, dur)}, "effects": [], "markers": [], "metadata": {}}"""
 
@@ -306,9 +312,13 @@ object Exporters {
             val tc = startTimecodeFrames(p.src, rate)
             val media = """{"OTIO_SCHEMA": "ExternalReference.1", "name": ${js(p.src.name)}, """ +
                 """"target_url": ${js(url(p.src.name))}, "available_range": ${range(tc, rate.toFrames(p.src.frames))}, "metadata": {}}"""
+            // Clip markers, in the clip's source time; only those inside the part of the clip that's used.
+            val markers = p.clip.markers.map { it to rate.toFrames(it.frame) }
+                .filter { (_, f) -> f >= p.inF && f < p.inF + p.len }
+                .joinToString(", ") { (m, f) -> marker(m, tc + f) }
             // Source times count from the file's own start timecode, as in Resolve's own OTIO files.
             return """{"OTIO_SCHEMA": "Clip.1", "name": ${js(p.src.name)}, "source_range": ${range(tc + p.inF, p.len)}, """ +
-                """"media_reference": $media, "effects": [], "markers": [], "enabled": true, "metadata": {}}"""
+                """"media_reference": $media, "effects": [], "markers": [$markers], "enabled": true, "metadata": {}}"""
         }
 
         fun track(name: String, kind: String, laneClips: List<Clip>, isVideo: Boolean, enabled: Boolean): String {
@@ -333,12 +343,8 @@ object Exporters {
         for (a in 0 until t.audioTracks) {
             tracks += track("A${a + 1}", "Audio", t.clips.filter { !it.video && it.track == a }, false, a !in t.mutedTracks)
         }
-        // Timeline markers sit on the stack, one frame long, as Resolve writes them.
-        val markers = t.markers.sortedBy { it.frame }.joinToString(",\n") { m ->
-            """{"OTIO_SCHEMA": "Marker.2", "name": ${js(m.name)}, "color": "${m.color.otio}", "comment": ${js(m.note)}, """ +
-                """"marked_range": ${range(rate.toFrames(m.frame), 1)}, """ +
-                """"metadata": {"Resolve_OTIO": {"Color": ${js(m.color.en)}, "Keywords": [], "Note": ${js(m.note)}}}}"""
-        }
+        // Timeline markers sit on the stack.
+        val markers = t.markers.sortedBy { it.frame }.joinToString(",\n") { m -> marker(m, rate.toFrames(m.frame)) }
         return """{"OTIO_SCHEMA": "Timeline.1", "name": ${js(t.name)}, "global_start_time": ${time(0)}, "metadata": {}, """ +
             """"tracks": {"OTIO_SCHEMA": "Stack.1", "name": "tracks", "source_range": null, "effects": [], "markers": [$markers], """ +
             """"metadata": {}, "children": [""" + tracks.joinToString(",\n") + "]}}\n"

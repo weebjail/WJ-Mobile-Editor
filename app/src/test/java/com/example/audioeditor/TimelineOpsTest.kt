@@ -176,4 +176,14 @@ class TimelineOpsTest {
         assertEquals(4 * sec, pieces[1].sourceIn)                              // right piece continues the media
         assertEquals(other, out.single { it.id == 3L })
     }
+
+    @Test fun clipMarkersStayWithTheirMediaWhenSplitAndMoved() {
+        val m = Marker(50, frame = 6 * sec)                                   // 6s into the source file
+        val a = Clip(1, 1, 0, start = 10 * sec, sourceIn = 2 * sec, length = 10 * sec, markers = listOf(m))
+        assertEquals(listOf(m to 14 * sec), a.visibleMarkers())               // 10s + (6s - 2s)
+        val out = TimelineOps.split(listOf(a), a, 12 * sec, ::newId).sortedBy { it.start }
+        assertTrue(out[0].visibleMarkers().isEmpty())                         // left piece ends before it
+        assertEquals(listOf(m to 14 * sec), out[1].visibleMarkers())
+        assertEquals(listOf(m to 2 * sec), out[1].copy(start = 0).visibleMarkers())   // moving the clip moves it too
+    }
 }
