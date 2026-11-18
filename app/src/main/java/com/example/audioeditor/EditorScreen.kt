@@ -242,16 +242,16 @@ fun EditorScreen(vm: EditorViewModel) {
             // Buttons here have their own sizes (small clipboard, large play / undo / redo), so the
             // row's minimum touch size is switched off and each button sets its size itself.
             ToolRow(minTouch = 0.dp) {
-                IconBtn(Icons.Default.ContentCut, tr("Cut clip", "クリップをカット"), size = 40.dp, iconSize = 20.dp, visibleWidth = 15.dp, onClick = vm::cutSelected)
-                IconBtn(Icons.Default.ContentCopy, tr("Copy clip", "クリップをコピー"), size = 40.dp, iconSize = 20.dp, visibleWidth = 16.dp, onClick = vm::copySelected)
+                IconBtn(Icons.Default.ContentCut, tr("Cut clip", "クリップをカット"), size = 40.dp, iconSize = 20.dp, modifier = Modifier.visibleWidth(15.dp), onClick = vm::cutSelected)
+                IconBtn(Icons.Default.ContentCopy, tr("Copy clip", "クリップをコピー"), size = 40.dp, iconSize = 20.dp, modifier = Modifier.visibleWidth(16.dp), onClick = vm::copySelected)
                 IconBtn(
                     Icons.Default.ContentPaste,
                     tr("Paste at the playhead (onto the paste tracks: tap a track name to choose)", "再生ヘッドに貼り付け（トラック名をタップして貼り付け先を選択）"),
-                    size = 40.dp, iconSize = 20.dp, visibleWidth = 15.dp,
+                    size = 40.dp, iconSize = 20.dp, modifier = Modifier.visibleWidth(15.dp),
                     enabled = vm.canPaste, onClick = vm::paste,
                 )
                 MarkerColorBtn(vm)
-                FilledIconButton(onClick = vm::togglePlay, modifier = Modifier.size(52.dp).visibleWidth(52.dp, leftExtra = 8.dp)) {
+                FilledIconButton(onClick = vm::togglePlay, modifier = Modifier.size(52.dp)) {
                     Icon(
                         if (vm.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = if (vm.isPlaying) tr("Pause", "一時停止") else tr("Play", "再生"),
@@ -259,7 +259,7 @@ fun EditorScreen(vm: EditorViewModel) {
                     )
                 }
                 Labeled(tr("Add marker (press again on a marker to edit it)", "マーカーを追加（マーカー上でもう一度押すと編集）")) {
-                    IconButton(onClick = vm::markerButton, modifier = Modifier.size(44.dp).visibleWidth(14.dp)) {
+                    IconButton(onClick = vm::markerButton, modifier = Modifier.visibleWidth(14.dp).size(44.dp)) {
                         Icon(
                             Icons.Default.Bookmark,
                             contentDescription = tr("Marker", "マーカー"),
@@ -267,8 +267,8 @@ fun EditorScreen(vm: EditorViewModel) {
                         )
                     }
                 }
-                IconBtn(Icons.AutoMirrored.Default.Undo, tr("Undo", "元に戻す"), size = 44.dp, iconSize = 26.dp, visibleWidth = 28.dp, enabled = vm.canUndo, onClick = vm::undo)
-                IconBtn(Icons.AutoMirrored.Default.Redo, tr("Redo", "やり直す"), size = 44.dp, iconSize = 26.dp, visibleWidth = 28.dp, enabled = vm.canRedo, onClick = vm::redo)
+                IconBtn(Icons.AutoMirrored.Default.Undo, tr("Undo", "元に戻す"), size = 44.dp, iconSize = 26.dp, modifier = Modifier.visibleWidth(28.dp, trimLeft = 7.dp, trimRight = 3.5.dp), enabled = vm.canUndo, onClick = vm::undo)
+                IconBtn(Icons.AutoMirrored.Default.Redo, tr("Redo", "やり直す"), size = 44.dp, iconSize = 26.dp, modifier = Modifier.visibleWidth(28.dp, trimLeft = 3.5.dp), enabled = vm.canRedo, onClick = vm::redo)
             }
             // BOTTOM ROW 2: editing
             ToolRow {
@@ -979,7 +979,7 @@ private fun MarkerColorBtn(vm: EditorViewModel) {
     val label = tr("Marker colour: ", "マーカーの色: ") + vm.markerColor.label
     Box {
         Labeled(label) {
-            IconButton(onClick = { open = true }, modifier = Modifier.size(40.dp).visibleWidth(20.dp)) {
+            IconButton(onClick = { open = true }, modifier = Modifier.visibleWidth(20.dp).size(40.dp)) {
                 // A ring in the current colour, so it reads as "colour setting" rather than a marker itself.
                 Box(Modifier.size(20.dp).border(3.dp, Color(vm.markerColor.argb), CircleShape))
             }
@@ -1086,11 +1086,11 @@ private fun IconBtn(
     enabled: Boolean = true,
     size: Dp? = null,
     iconSize: Dp? = null,
-    visibleWidth: Dp? = null,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
     Labeled(label) {
-        val m = (size?.let { Modifier.size(it) } ?: Modifier).let { mod -> visibleWidth?.let { mod.visibleWidth(it) } ?: mod }
+        val m = modifier.then(size?.let { Modifier.size(it) } ?: Modifier)
         IconButton(onClick = onClick, enabled = enabled, modifier = m) {
             Icon(icon, contentDescription = label, modifier = iconSize?.let { Modifier.size(it) } ?: Modifier)
         }
@@ -1100,15 +1100,15 @@ private fun IconBtn(
 /**
  * Takes up only [width] in the row (the width of the icon you actually see), while the button keeps its
  * full size and touch area, centred over that space. A row spaced evenly then has equal gaps between
- * the visible icons, however much empty margin each button has around its icon. [leftExtra] adds space
- * on the left only, for icons that look closer to their left-hand neighbour than the numbers say.
+ * the visible icons, however much empty margin each button has around its icon. [trimLeft] / [trimRight]
+ * take that much off one side of the space, pulling the neighbour on that side closer.
+ * Put it before any size modifier, so the button still gets its full size.
  */
-private fun Modifier.visibleWidth(width: Dp, leftExtra: Dp = 0.dp) = layout { measurable, constraints ->
+private fun Modifier.visibleWidth(width: Dp, trimLeft: Dp = 0.dp, trimRight: Dp = 0.dp) = layout { measurable, constraints ->
     val p = measurable.measure(constraints.copy(minWidth = 0, maxWidth = Constraints.Infinity))
-    val extra = leftExtra.roundToPx()
-    val w = width.roundToPx() + extra
-    // Any extra space goes on the left, nudging the button right.
-    layout(w, p.height) { p.place(extra + (w - extra - p.width) / 2, 0) }
+    val left = trimLeft.roundToPx()
+    val w = width.roundToPx() - left - trimRight.roundToPx()
+    layout(w, p.height) { p.place((width.roundToPx() - p.width) / 2 - left, 0) }
 }
 
 @Composable
