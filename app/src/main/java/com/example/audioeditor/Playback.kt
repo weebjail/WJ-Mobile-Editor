@@ -24,11 +24,12 @@ class Mixer(private val sources: Map<Long, AudioSource>, clips: List<Clip>, mute
             val stop = minOf(end, c.end, c.start - c.sourceIn + pcm.frames)
             val fadeInEnd = c.start + c.fadeIn.frames
             val fadeOutStart = c.end - c.fadeOut.frames
+            if (c.volume <= 0f) continue
             var t = from
             while (t < stop) {
                 val rel = t - c.start
                 val srcFrame = c.sourceIn + rel
-                val g = if (t < fadeInEnd || t >= fadeOutStart) c.gainAt(rel) else 1f
+                val g = if (t < fadeInEnd || t >= fadeOutStart) c.gainAt(rel) else c.volume
                 val o = ((t - start) * 2).toInt()
                 out[o] += pcm.left(srcFrame) * g
                 out[o + 1] += pcm.right(srcFrame) * g

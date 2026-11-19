@@ -232,6 +232,14 @@ object Exporters {
                 sb.append("<start>${p.start}</start><end>${p.end}</end><in>${p.inF}</in><out>${p.inF + p.len}</out>\n")
                 fileXml(sb, p.src)
                 if (!isVideo) sb.append("<sourcetrack><mediatype>audio</mediatype><trackindex>1</trackindex></sourcetrack>\n")
+                // Clip volume: the standard Audio Levels filter, which Resolve reads as the clip's volume.
+                if (!isVideo && p.clip.volume != 1f) {
+                    sb.append("<filter><effect><name>Audio Levels</name><effectid>audiolevels</effectid>")
+                    sb.append("<effectcategory>audiolevels</effectcategory><effecttype>audiolevels</effecttype><mediatype>audio</mediatype>")
+                    sb.append("<parameter><parameterid>level</parameterid><name>Level</name><valuemin>0</valuemin>")
+                    sb.append("<valuemax>3.98109</valuemax><value>${"%.5f".format(java.util.Locale.US, p.clip.volume)}</value></parameter>")
+                    sb.append("</effect></filter>\n")
+                }
                 sb.append("</clipitem>\n")
                 if (p.fadeOut > 0) appendTransition(sb, rateXml, p.end - p.fadeOut, p.end, "end-black", p.clip.fadeOut.curve)
                 p.xfade?.let { x -> appendTransition(sb, rateXml, x.start, x.end, "center", x.curve) }

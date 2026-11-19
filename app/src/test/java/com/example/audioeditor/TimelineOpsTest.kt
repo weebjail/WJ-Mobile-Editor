@@ -186,4 +186,46 @@ class TimelineOpsTest {
         assertEquals(listOf(m to 14 * sec), out[1].visibleMarkers())
         assertEquals(listOf(m to 2 * sec), out[1].copy(start = 0).visibleMarkers())   // moving the clip moves it too
     }
+
+    // A crossfades into B over 9.5-10.5 s (the edit point is at 10 s); C follows B.
+    private val xa = Clip(1, 1, 0, 0, 0, 10 * sec + sec / 2, fadeOut = Fade(sec))
+    private val xb = Clip(2, 2, 0, 9 * sec + sec / 2, 0, 5 * sec + sec / 2, fadeIn = Fade(sec))
+    private val xc = Clip(3, 3, 0, 15 * sec, 0, 5 * sec)
+
+    @Test fun rippleTrimEndStopsAtTheCrossfadeMiddle() {
+        val out = TimelineOps.rippleTrimEnd(listOf(xa, xb, xc), xa, 7 * sec).associateBy { it.id }
+        // Only A's own part (7-10 s) goes; the crossfade stays, now centred on 7 s.
+        assertEquals(7 * sec + sec / 2, out[1]!!.end)
+        assertEquals(sec, out[1]!!.fadeOut.frames)
+        assertEquals(6 * sec + sec / 2, out[2]!!.start)
+        assertEquals(0L, out[2]!!.sourceIn)
+        assertEquals(12 * sec, out[3]!!.start)
+        assertEquals(7 * sec to 12 * sec, TimelineOps.visibleSpan(out.values.toList(), out[2]!!))
+    }
+
+    @Test fun rippleTrimStartStopsAtTheCrossfadeMiddle() {
+        val out = TimelineOps.rippleTrimStart(listOf(xa, xb, xc), xb, 12 * sec).associateBy { it.id }
+        // Only B's own part (10-12 s) goes; the crossfade stays, now leading into B's media from 12 s.
+        assertEquals(10 * sec + sec / 2, out[1]!!.end)
+        assertEquals(9 * sec + sec / 2, out[2]!!.start)
+        assertEquals(2 * sec, out[2]!!.sourceIn)
+        assertEquals(sec, out[2]!!.fadeIn.frames)
+        assertEquals(13 * sec, out[3]!!.start)
+    }
+
+    @Test fun rippleTrimPastTheCrossfadeMakesAPlainCut() {
+        // Trimming B to its last 0.2 s: too short to keep the crossfade, so it becomes a cut first.
+        val out = TimelineOps.rippleTrimStart(listOf(xa, xb), xb, 14 * sec + sec * 8 / 10).associateBy { it.id }
+        assertEquals(10 * sec, out[1]!!.end)
+        assertEquals(10 * sec, out[2]!!.start)
+        assertEquals(sec / 5, out[2]!!.length)
+        assertEquals(0L, out[2]!!.fadeIn.frames)
+    }
+
+    @Test fun volumeLineRoundTrips() {
+        for (v in floatArrayOf(0f, 0.25f, 0.5f, 1f, 2f, MAX_CLIP_VOLUME)) {
+            assertEquals(v, lineFractionToVolume(volumeToLineFraction(v)), 1e-4f)
+        }
+        assertEquals(1f / 3f, volumeToLineFraction(1f), 1e-6f)
+    }
 }

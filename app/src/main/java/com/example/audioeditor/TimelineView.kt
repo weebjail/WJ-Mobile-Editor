@@ -49,7 +49,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-private enum class Mode { UNDECIDED, SCRUB, PLAYHEAD, MOVE, TRIM, PAN, PINCH, HELD }
+private enum class Mode { UNDECIDED, SCRUB, PLAYHEAD, MOVE, TRIM, VOLUME, PAN, PINCH, HELD }
 
 /** A clip edge under the finger: which clip, which end, and how far the finger is from it (px). */
 private class EdgeHit(val clip: Clip, val atStart: Boolean, val distance: Float)
@@ -154,6 +154,17 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
         return best
     }
 
+    /** Top and height of the clip box in [lane] (clips are inset 4px from the lane's edges). */
+    fun clipTop(lane: Int) = rulerH + lane * trackH - scrollY + 4f
+    val clipH = trackH - 8f
+
+    /** The audio clip whose volume line is within [zonePx] of the finger, like grabbing Resolve's clip volume line. */
+    fun volumeLineAt(p: Offset, zonePx: Float): Clip? {
+        val c = clipAt(p)?.takeIf { !it.video } ?: return null
+        val y = clipTop(vm.laneOf(c)) + clipH * volumeToLineFraction(c.volume)
+        return c.takeIf { abs(p.y - y) <= zonePx }
+    }
+
     Canvas(
         modifier
             .clipToBounds()
@@ -162,6 +173,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                 val snapPx = 14.dp.toPx()
                 val grabPx = 22.dp.toPx()
                 val trimPx = 16.dp.toPx()
+                val volumePx = 10.dp.toPx()
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val onRuler = down.position.y < rulerH
@@ -177,6 +189,10 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     val edge = if (onRuler || onHeader) null else edgeAt(down.position, trimPx)
                         ?.takeIf { !onPlayhead || it.distance < abs(grabOffset) }
                     if (edge != null) onPlayhead = false
+                    // Otherwise, an audio clip's volume line under the finger is dragged up or down.
+                    val volumeClip = if (onRuler || onHeader || onPlayhead || edge != null) null
+                    else volumeLineAt(down.position, volumePx)
+                    val volumeFrom = volumeClip?.let { volumeToLineFraction(it.volume) } ?: 0f
                     var mode = if (onRuler) Mode.SCRUB else Mode.UNDECIDED
                     if (onRuler) vm.scrubTo(frameAt(down.position.x), snapPx)
                     var total = Offset.Zero
@@ -200,6 +216,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                         if (pressed.isEmpty()) break
                         if (pressed.size >= 2 || mode == Mode.PINCH) {
                             if (mode == Mode.MOVE || mode == Mode.TRIM) vm.cancelDrag()
+                            if (mode == Mode.VOLUME) vm.endVolumeEdit()
                             if (mode == Mode.SCRUB || mode == Mode.PLAYHEAD) vm.endScrub()
                             mode = Mode.PINCH
                             if (pressed.size >= 2) {
@@ -218,6 +235,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                             mode = when {
                                 onPlayhead -> Mode.PLAYHEAD
                                 edge != null -> { vm.beginTrim(edge.clip.id, edge.atStart); Mode.TRIM }
+                                volumeClip != null -> { vm.beginVolumeEdit(volumeClip.id); Mode.VOLUME }
                                 hit != null -> { vm.beginDrag(hit.id); Mode.MOVE }
                                 else -> Mode.PAN
                             }
@@ -227,6 +245,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                             Mode.PLAYHEAD -> vm.scrubTo(frameAt(ch.position.x - grabOffset), snapPx)
                             Mode.MOVE -> vm.dragTo(total.x, laneAt(ch.position.y), snapPx)
                             Mode.TRIM -> vm.trimTo(total.x, snapPx)
+                            Mode.VOLUME -> vm.dragVolume(lineFractionToVolume(volumeFrom + total.y / clipH))
                             Mode.PAN -> {
                                 vm.scrollByPx(delta.x)
                                 val maxY = (rulerH + vm.laneCount * trackH - size.height).coerceAtLeast(0f)
@@ -239,6 +258,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     when (mode) {
                         Mode.MOVE -> vm.endDrag()
                         Mode.TRIM -> vm.endTrim()
+                        Mode.VOLUME -> vm.endVolumeEdit()
                         Mode.SCRUB, Mode.PLAYHEAD -> vm.endScrub()
                         Mode.UNDECIDED -> when {
                             onHeader -> {
@@ -328,7 +348,7 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                             if (src.peaks[i] > peak) peak = src.peaks[i]
                             i++
                         }
-                        val amp = maxOf(peak.coerceAtMost(1f) * c.gainAt(rel) * half, 0.5f)
+                        val amp = (peak.coerceAtMost(1f) * c.gainAt(rel) * half).coerceIn(0.5f, half)
                         wave.moveTo(x.toFloat(), mid - amp)
                         wave.lineTo(x.toFloat(), mid + amp)
                     }
@@ -343,6 +363,24 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
             }
             if (c.fadeOut.frames > 0 && ve == c.end) {
                 drawFade(xOf(c.end - c.fadeOut.frames), x1, top, ch, false, c.fadeOut.curve)
+            }
+
+            // Volume line (audio clips): drag it up or down to set the clip's volume, as in Resolve.
+            if (!c.video) {
+                val ly = top + ch * volumeToLineFraction(c.volume)
+                val lx0 = max(x0, headerW)
+                val lx1 = min(x1, w)
+                val editing = c.id == vm.volumeEditId
+                drawLine(
+                    Color.White.copy(alpha = (if (editing) 1f else 0.6f) * alpha), Offset(lx0, ly), Offset(lx1, ly),
+                    strokeWidth = (if (editing) 2.dp else 1.dp).toPx(),
+                )
+                if (editing && lx1 - lx0 > 40f) {
+                    val label = textMeasurer.measure(formatDb(c.volume), TextStyle(color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold))
+                    val ty = if (ly - label.size.height - 4f >= top) ly - label.size.height - 4f else ly + 4f
+                    drawRoundRect(Color.Black.copy(alpha = 0.6f), Offset(lx0 + 6f, ty - 1f), Size(label.size.width + 10f, label.size.height + 2f), CornerRadius(4f))
+                    drawText(label, topLeft = Offset(lx0 + 11f, ty))
+                }
             }
 
             // Name (with a link mark for linked clips)
@@ -406,8 +444,8 @@ fun TimelineView(vm: EditorViewModel, modifier: Modifier = Modifier) {
                 val t = i / n.toFloat()
                 val f = b.start + ((a.end - b.start) * t).toLong()
                 val x = xs + (xe - xs) * t
-                val yOut = top + ch * (1f - a.gainAt(f - a.start))
-                val yIn = top + ch * (1f - b.gainAt(f - b.start))
+                val yOut = top + ch * (1f - a.fadeGainAt(f - a.start))
+                val yIn = top + ch * (1f - b.fadeGainAt(f - b.start))
                 if (i == 0) {
                     outLine.moveTo(x, yOut); inLine.moveTo(x, yIn)
                 } else {

@@ -837,26 +837,27 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun rippleTrimEdit(atStart: Boolean) {
         // The clip at the playhead. The selected clip only counts if the playhead is inside it
         // (that's how to pick between clips stacked on different tracks).
-        val t = selectedClip?.takeIf { s -> group(s).any(::inside) } ?: clipUnderPlayhead(::inside)
+        // Inside a crossfade each clip only reaches the middle of it (as drawn), so the trim stops there
+        // rather than running on to the far end of the crossfade.
+        val span = clips.associate { it.id to TimelineOps.visibleSpan(clips, it) }
+        fun insideVisible(c: Clip) = span.getValue(c.id).let { (s, e) -> playhead > s && playhead < e }
+        val t = selectedClip?.takeIf { s -> group(s).any(::insideVisible) } ?: clipUnderPlayhead(::insideVisible)
             ?: run { message = tr("Move the playhead inside a clip to trim it", "トリムするには再生ヘッドをクリップの内側に移動してください"); return }
-        val members = group(t).filter(::inside)
-        if (rippleAllTracks) {
-            // Remove that stretch of time from every track.
-            val from = if (atStart) members.minOf { it.start } else playhead
-            val to = if (atStart) playhead else members.maxOf { it.end }
-            val new = TimelineOps.rippleRemoveRange(clips, from, to, ::newId, ::onUnlockedTrack)
-            commit(new)
-            playhead = from
-            // Keep the trimmed clip selected: the piece now starting (or ending) at the edit point.
-            overrideSelectedId = new.firstOrNull { it.sameLane(t) && (if (atStart) it.start == from else it.end == from) }?.id
-            return
-        }
+        val members = group(t).filter(::insideVisible)
+        val from = if (atStart) members.minOf { span.getValue(it.id).first } else playhead
+        val to = if (atStart) playhead else members.maxOf { span.getValue(it.id).second }
         var new = clips
+        if (rippleAllTracks) {
+            // Remove that stretch of time from every other track; the trimmed clips' own tracks are trimmed
+            // below, which keeps any crossfade on them intact.
+            val lanes = members.map { it.video to it.track }.toSet()
+            new = TimelineOps.rippleRemoveRange(new, from, to, ::newId) { onUnlockedTrack(it) && (it.video to it.track) !in lanes }
+        }
         for (m in members) {
             new = if (atStart) TimelineOps.rippleTrimStart(new, m, playhead) else TimelineOps.rippleTrimEnd(new, m, playhead)
         }
         commit(new)
-        if (atStart) playhead = members.minOf { it.start }
+        playhead = from
         overrideSelectedId = t.id
     }
 
@@ -1084,6 +1085,29 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
         })
     }
+
+    // ------------------------------------------------------------ Clip volume (the line across an audio clip)
+
+    /** The audio clip whose volume line is being dragged (its level is shown while dragging). */
+    var volumeEditId by mutableStateOf<Long?>(null); private set
+
+    /** Starts dragging an audio clip's volume line; the whole drag is one undo step. */
+    fun beginVolumeEdit(clipId: Long) {
+        val c = clips.find { it.id == clipId }?.takeIf { !it.video && isEditable(it) } ?: return
+        pushUndo()
+        volumeEditId = c.id
+        overrideSelectedId = c.id
+    }
+
+    /** Sets the dragged clip's volume; within half a dB of 0 dB it snaps to 0 dB, like Resolve. */
+    fun dragVolume(volume: Float) {
+        val id = volumeEditId ?: return
+        var v = volume.coerceIn(0f, MAX_CLIP_VOLUME)
+        if (abs(volumeToDb(v)) < 0.5f) v = 1f
+        applyClips(clips.map { if (it.id == id) it.copy(volume = v) else it })
+    }
+
+    fun endVolumeEdit() { volumeEditId = null }
 
     // ------------------------------------------------------------ Crossfade length
 
@@ -1441,7 +1465,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             SavedClip(
                 it.id, it.sourceId, it.track, it.start, it.sourceIn, it.length,
                 it.fadeIn.frames, it.fadeIn.curve.name, it.fadeOut.frames, it.fadeOut.curve.name,
-                it.video, it.linkId, it.grade, it.markers,
+                it.video, it.linkId, it.grade, it.markers, it.volume,
             )
         },
         videoTrackCount, mutedTracks,
@@ -1549,6 +1573,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         linkId = c.linkId,
                         grade = c.grade,
                         markers = c.markers,
+                        volume = c.volume,
                     )
                 }
                 sources = loaded

@@ -29,28 +29,90 @@ object TimelineOps {
         return clips.flatMap { if (it.id == target.id) listOf(left, right) else listOf(it) }
     }
 
-    /** Remove everything from the clip's start up to [at], then pull the rest of the lane left. */
-    fun rippleTrimStart(clips: List<Clip>, target: Clip, at: Long): List<Clip> {
-        val d = at - target.start
-        if (d <= 0 || at >= target.end) return clips
+    /** The audio clip that crossfades into [c] (overlapping its start), if any. */
+    private fun crossfadeBefore(clips: List<Clip>, c: Clip): Clip? = if (c.video) null else
+        clips.filter { it.sameLane(c) && it.id != c.id && it.start < c.start && it.end > c.start && c.end > it.end }
+            .maxByOrNull { it.end }
+
+    /** The audio clip [c] crossfades into (overlapping its end), if any. */
+    private fun crossfadeAfter(clips: List<Clip>, c: Clip): Clip? = if (c.video) null else
+        clips.filter { it.sameLane(c) && it.id != c.id && it.start > c.start && it.start < c.end && it.end > c.end }
+            .minByOrNull { it.start }
+
+    /**
+     * Where [c] visibly starts and ends: inside a crossfade each clip owns up to the middle of the overlap
+     * (the edit point), as it's drawn on the timeline.
+     */
+    fun visibleSpan(clips: List<Clip>, c: Clip): Pair<Long, Long> {
+        val s = crossfadeBefore(clips, c)?.let { (c.start + it.end) / 2 } ?: c.start
+        val e = crossfadeAfter(clips, c)?.let { (it.start + c.end) / 2 } ?: c.end
+        return s to e
+    }
+
+    /** Turns the crossfade between [a] and [b] back into a plain cut at its middle. */
+    private fun plainCut(clips: List<Clip>, a: Clip, b: Clip): List<Clip> {
+        val cut = (b.start + a.end) / 2
         return clips.map {
-            when {
-                it.id == target.id ->
-                    it.copy(sourceIn = it.sourceIn + d, length = it.length - d).withValidFades()
-                it.sameLane(target) && it.start > target.start -> it.copy(start = it.start - d)
+            when (it.id) {
+                a.id -> it.copy(length = cut - it.start, fadeOut = Fade(0L, it.fadeOut.curve)).withValidFades()
+                b.id -> it.copy(start = cut, sourceIn = it.sourceIn + (cut - it.start), length = it.end - cut, fadeIn = Fade(0L, it.fadeIn.curve)).withValidFades()
                 else -> it
             }
         }
     }
 
-    /** Remove everything from [at] to the clip's end, then pull the rest of the lane left. */
-    fun rippleTrimEnd(clips: List<Clip>, target: Clip, at: Long): List<Clip> {
-        val d = target.end - at
-        if (d <= 0 || at <= target.start) return clips
-        return clips.map {
+    /**
+     * Remove everything from the clip's (visible) start up to [at], then pull the rest of the lane left.
+     * If the clip starts with a crossfade, only the clip's own part (from the middle of the crossfade) is
+     * removed and the crossfade stays, now leading into the media at [at].
+     */
+    fun rippleTrimStart(clips: List<Clip>, target: Clip, at: Long): List<Clip> {
+        var list = clips
+        var t = target
+        crossfadeBefore(list, t)?.let { p ->
+            // Trimming so far that the crossfade wouldn't fit any more: make it a plain cut first.
+            val d = at - (t.start + p.end) / 2
+            if (t.end - d <= p.end) {
+                list = plainCut(list, p, t)
+                t = list.first { it.id == t.id }
+            }
+        }
+        val visStart = visibleSpan(list, t).first
+        val d = at - visStart
+        if (d <= 0 || at >= t.end) return clips
+        return list.map {
             when {
-                it.id == target.id -> it.copy(length = at - it.start).withValidFades()
-                it.sameLane(target) && it.start > target.start -> it.copy(start = it.start - d)
+                it.id == t.id ->
+                    it.copy(sourceIn = it.sourceIn + d, length = it.length - d).withValidFades()
+                it.sameLane(t) && it.start > t.start -> it.copy(start = it.start - d)
+                else -> it
+            }
+        }
+    }
+
+    /**
+     * Remove everything from [at] to the clip's (visible) end, then pull the rest of the lane left.
+     * If the clip ends in a crossfade, only the clip's own part (up to the middle of the crossfade) is
+     * removed and the crossfade stays, now starting from the media at [at].
+     */
+    fun rippleTrimEnd(clips: List<Clip>, target: Clip, at: Long): List<Clip> {
+        var list = clips
+        var t = target
+        crossfadeAfter(list, t)?.let { n ->
+            // Trimming so far that the crossfade wouldn't fit any more: make it a plain cut first.
+            val d = (n.start + t.end) / 2 - at
+            if (n.start - d <= t.start) {
+                list = plainCut(list, t, n)
+                t = list.first { it.id == t.id }
+            }
+        }
+        val visEnd = visibleSpan(list, t).second
+        val d = visEnd - at
+        if (d <= 0 || at <= t.start) return clips
+        return list.map {
+            when {
+                it.id == t.id -> it.copy(length = it.length - d).withValidFades()
+                it.sameLane(t) && it.start > t.start -> it.copy(start = it.start - d)
                 else -> it
             }
         }

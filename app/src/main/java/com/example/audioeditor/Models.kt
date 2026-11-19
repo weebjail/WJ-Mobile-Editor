@@ -2,6 +2,9 @@ package com.example.audioeditor
 
 import android.net.Uri
 import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.log10
+import kotlin.math.pow
 import kotlin.math.sin
 
 /** Everything inside the editor runs at 48 kHz stereo. Imported files are converted on import. */
@@ -74,11 +77,16 @@ data class Clip(
     val grade: Grade = Grade(),   // colour (video clips only)
     /** Clip markers, like Resolve's: [Marker.frame] is a position in the source media, so they move with the clip. */
     val markers: List<Marker> = emptyList(),
+    /** Clip volume as a plain multiplier (1 = 0 dB), like Resolve's clip volume line. Audio clips only. */
+    val volume: Float = 1f,
 ) {
     val end: Long get() = start + length
 
-    /** Volume multiplier (0..1) at a position measured from the clip's start. */
-    fun gainAt(pos: Long): Float {
+    /** Volume multiplier at a position measured from the clip's start: the clip volume times its fades. */
+    fun gainAt(pos: Long): Float = volume * fadeGainAt(pos)
+
+    /** The fades alone (0..1) at a position measured from the clip's start. */
+    fun fadeGainAt(pos: Long): Float {
         var g = 1f
         if (pos < fadeIn.frames) {
             g *= fadeInGain(pos.toFloat() / fadeIn.frames, fadeIn.curve)
@@ -153,6 +161,31 @@ data class Marker(
     val name: String = "",
     val note: String = "",
 )
+
+/** Loudest clip volume: +12 dB, the top of the clip volume line. */
+const val MAX_CLIP_VOLUME = 3.981072f
+
+fun volumeToDb(v: Float): Float = if (v <= 0f) Float.NEGATIVE_INFINITY else (20.0 * log10(v.toDouble())).toFloat()
+
+fun dbToVolume(db: Float): Float = 10.0.pow(db / 20.0).toFloat()
+
+/** "+3.0 dB", "-6.0 dB", "-∞ dB". */
+fun formatDb(v: Float): String {
+    val db = volumeToDb(v)
+    return if (db < -60f) "-∞ dB" else "%+.1f dB".format(if (abs(db) < 0.05f) 0f else db)
+}
+
+/**
+ * Where the clip volume line sits, as a fraction of the clip's height from the top. The top is +12 dB and
+ * 0 dB is a third of the way down; below that the line falls in step with the volume, to silence at the bottom.
+ */
+fun volumeToLineFraction(v: Float): Float =
+    if (v >= 1f) (1f - volumeToDb(v) / 12f) / 3f else 1f - v.coerceAtLeast(0f) * (2f / 3f)
+
+fun lineFractionToVolume(f: Float): Float {
+    val x = f.coerceIn(0f, 1f)
+    return if (x <= 1f / 3f) dbToVolume(12f * (1f - 3f * x)) else ((1f - x) * 1.5f).coerceIn(0f, 1f)
+}
 
 fun formatTime(frames: Long): String {
     val totalCs = frames * 100 / SAMPLE_RATE
