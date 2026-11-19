@@ -88,7 +88,8 @@ private val HeaderGap = 4.dp
  *    (it snaps to clip edges, cuts and markers when snapping is on). Markers show as flags on the ruler.
  *  - tap a clip: select it.  Tap empty space: deselect and move the playhead there
  *  - press and drag a clip: move it (and anything linked to it) in time, or to another track of the same kind
- *  - press and drag a clip's edge: shorten or extend it
+ *  - press and drag a clip's edge: shorten or extend it (extending into the next clip trims that one back)
+ *  - drag an audio clip's volume line up or down: set its volume
  *  - drag anywhere else: scroll.  Pinch with two fingers: zoom
  *  - track header (left edge): tap the name (V1, A1…) to make it the paste track; below it, the left half
  *    locks / unlocks the track and the right half mutes / unmutes an audio track

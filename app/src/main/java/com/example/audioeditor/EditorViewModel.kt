@@ -1316,7 +1316,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         var lo = Long.MIN_VALUE
         var hi = Long.MAX_VALUE
         for (m in g) {
-            val r = TimelineOps.trimRange(clips, m, atStart, sourceFramesOf(m), ids)
+            val r = TimelineOps.trimRange(clips, m, atStart, sourceFramesOf(m), ids, ::isEditable) { group(it) }
             lo = maxOf(lo, r.first)
             hi = minOf(hi, r.last)
         }
@@ -1345,7 +1345,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             if (l != null && s - edge in trimRange) { d = s - edge; line = l }
         }
         d = d.coerceIn(trimRange)
-        dragPreview = g.map { TimelineOps.trimEdge(it, trimAtStart, d) }
+        // Running into a neighbouring clip trims it back (Resolve's roll edit).
+        dragPreview = TimelineOps.trimWithPush(clips, g, trimAtStart, d, ::isEditable) { group(it) }
         snapLine = line
     }
 

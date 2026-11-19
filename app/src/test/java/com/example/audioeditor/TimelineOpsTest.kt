@@ -228,4 +228,28 @@ class TimelineOpsTest {
         }
         assertEquals(1f / 3f, volumeToLineFraction(1f), 1e-6f)
     }
+
+    @Test fun extendingIntoANeighbourTrimsItBack() {
+        // A (0-10 s) touches B (10-20 s, source from 5 s). Dragging A's end 3 s right trims 3 s off B's start.
+        val a = Clip(1, 1, 0, 0, 0, 10 * sec)
+        val b = Clip(2, 2, 0, 10 * sec, 5 * sec, 10 * sec)
+        val range = TimelineOps.trimRange(listOf(a, b), a, false, 60 * sec, emptySet(), { true }) { listOf(it) }
+        assertEquals(10 * sec - TimelineOps.MIN_TRIM_LENGTH, range.last)   // B can shrink to the minimum
+        val out = TimelineOps.trimWithPush(listOf(a, b), listOf(a), false, 3 * sec, { true }) { listOf(it) }.associateBy { it.id }
+        assertEquals(13 * sec, out[1]!!.end)
+        assertEquals(13 * sec, out[2]!!.start)
+        assertEquals(8 * sec, out[2]!!.sourceIn)   // B's media stays in place
+        assertEquals(20 * sec, out[2]!!.end)
+        // Without permission to push (e.g. B is locked) the edge stops at B, as before.
+        assertEquals(0L, TimelineOps.trimRange(listOf(a, b), a, false, 60 * sec, emptySet()).last)
+    }
+
+    @Test fun extendingStartIntoANeighbourTrimsItsEnd() {
+        val a = Clip(1, 1, 0, 0, 0, 10 * sec)
+        val b = Clip(2, 2, 0, 10 * sec, 5 * sec, 10 * sec)
+        val out = TimelineOps.trimWithPush(listOf(a, b), listOf(b), true, -2 * sec, { true }) { listOf(it) }.associateBy { it.id }
+        assertEquals(8 * sec, out[1]!!.end)
+        assertEquals(8 * sec, out[2]!!.start)
+        assertEquals(3 * sec, out[2]!!.sourceIn)
+    }
 }

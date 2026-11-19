@@ -166,18 +166,64 @@ object TimelineOps {
 
     /**
      * How far (in frames, negative = left) the start or end edge of [c] can move when dragged: limited by
-     * the media in its source file, by the neighbouring clips in its lane (it can't be extended over them),
-     * and by a minimum length. Clips in [ignore] (e.g. clips linked to [c]) don't count as neighbours.
+     * the media in its source file and by a minimum length. Extending into a neighbouring clip in its lane
+     * trims that clip back (with the clips linked to it), like Resolve's roll edit, as long as [canPush] allows
+     * it and the neighbour keeps a minimum length; otherwise the neighbour stops the edge. Clips in [ignore]
+     * (e.g. clips linked to [c]) don't count as neighbours.
      */
-    fun trimRange(clips: List<Clip>, c: Clip, atStart: Boolean, sourceFrames: Long, ignore: Set<Long>): LongRange {
+    fun trimRange(
+        clips: List<Clip>, c: Clip, atStart: Boolean, sourceFrames: Long, ignore: Set<Long>,
+        canPush: (Clip) -> Boolean = { false }, groupOf: (Clip) -> List<Clip> = { listOf(it) },
+    ): LongRange {
         val lane = clips.filter { it.sameLane(c) && it.id != c.id && it.id !in ignore }
+        fun room(n: Clip) = groupOf(n).minOf { it.length } - MIN_TRIM_LENGTH
         return if (atStart) {
-            val prevLimit = lane.filter { it.start < c.start }.maxOfOrNull { minOf(it.end, c.start) } ?: 0L
-            maxOf(-c.sourceIn, prevLimit - c.start)..(c.length - MIN_TRIM_LENGTH)
+            var lo = maxOf(-c.sourceIn, -c.start)   // not before the media starts, nor before 0:00
+            for (p in lane.filter { it.start < c.start }) {
+                val overlap = maxOf(0L, p.end - c.start)   // a crossfade into c
+                lo = maxOf(lo, if (canPush(p)) p.end - room(p) - c.start - overlap else minOf(p.end, c.start) - c.start)
+            }
+            lo..(c.length - MIN_TRIM_LENGTH)
         } else {
-            val nextLimit = lane.filter { it.start > c.start }.minOfOrNull { maxOf(it.start, c.end) } ?: Long.MAX_VALUE
-            -(c.length - MIN_TRIM_LENGTH)..minOf(sourceFrames - (c.sourceIn + c.length), nextLimit - c.end)
+            var hi = sourceFrames - (c.sourceIn + c.length)
+            for (n in lane.filter { it.start > c.start }) {
+                val overlap = maxOf(0L, c.end - n.start)   // a crossfade out of c
+                hi = minOf(hi, if (canPush(n)) n.start + room(n) + overlap - c.end else maxOf(n.start, c.end) - c.end)
+            }
+            -(c.length - MIN_TRIM_LENGTH)..hi
         }
+    }
+
+    /**
+     * How many frames moving [c]'s edge by [d] trims off neighbour [n]'s facing edge (0 if it doesn't reach it).
+     * Clips that crossfade keep their overlap, so the crossfade moves with the edge.
+     */
+    private fun pushAmount(c: Clip, n: Clip, atStart: Boolean, d: Long): Long =
+        if (atStart) maxOf(0L, n.end - (c.start + d + maxOf(0L, n.end - c.start)))
+        else maxOf(0L, c.end + d - maxOf(0L, c.end - n.start) - n.start)
+
+    /**
+     * Moves the start or end edge of every clip in [group] by [d] (see [trimEdge]). Neighbours the edge runs
+     * into are trimmed back to make room, with the clips linked to them so they stay in sync.
+     * Returns the changed clips: [group] and any neighbours it pushed.
+     */
+    fun trimWithPush(
+        clips: List<Clip>, group: List<Clip>, atStart: Boolean, d: Long,
+        canPush: (Clip) -> Boolean, groupOf: (Clip) -> List<Clip>,
+    ): List<Clip> {
+        val ids = group.map { it.id }.toSet()
+        val push = HashMap<Long, Long>()   // clip id -> frames trimmed off its edge facing the drag
+        for (m in group) for (n in clips) {
+            if (!n.sameLane(m) || n.id in ids || !canPush(n)) continue
+            if (if (atStart) n.start >= m.start else n.start <= m.start) continue
+            val x = pushAmount(m, n, atStart, d)
+            if (x > 0) for (g in groupOf(n)) push[g.id] = maxOf(push[g.id] ?: 0L, x)
+        }
+        val pushed = clips.filter { it.id in push && it.id !in ids }.map {
+            val x = push.getValue(it.id)
+            if (atStart) trimEdge(it, false, -x) else trimEdge(it, true, x)
+        }
+        return group.map { trimEdge(it, atStart, d) } + pushed
     }
 
     /** Moves the start or end edge of [c] by [d] frames (the media stays in place, like Resolve's trim). */
