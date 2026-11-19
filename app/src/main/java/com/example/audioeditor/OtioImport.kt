@@ -21,6 +21,7 @@ object OtioImport {
         val sourceIn: Double,
         val fadeIn: Double = 0.0,
         val fadeOut: Double = 0.0,
+        val volume: Float = 1f,   // clip volume as a multiplier (Resolve's Fairlight clip volume)
     )
 
     data class OTrack(val video: Boolean, val enabled: Boolean, val clips: List<OClip>)
@@ -93,7 +94,7 @@ object OtioImport {
                     } else {
                         val start = (range?.get("start_time") as? Map<*, *>).seconds()
                         val mediaStart = (available?.get("start_time") as? Map<*, *>).seconds()
-                        val c = OClip(fileName(url), cursor, dur, start - mediaStart)
+                        val c = OClip(fileName(url), cursor, dur, start - mediaStart, volume = if (video) 1f else clipVolume(child))
                         items += c
                         clips += c
                     }
@@ -157,6 +158,22 @@ object OtioImport {
                     ?.let { (it["duration"] as? Map<*, *>).seconds() } ?: 0.0
             } else duration(c)
         }
+    }
+
+    /**
+     * The clip volume Resolve stores as a "Fairlight Clip Volume and Fades" effect: its "volume" parameter, in dB
+     * (absent when the volume is left at 0 dB). Keyframed volume isn't supported; the base level is used.
+     */
+    internal fun clipVolume(clip: Map<*, *>): Float {
+        for (e in (clip["effects"] as? List<*>).orEmpty().filterIsInstance<Map<*, *>>()) {
+            val r = (e["metadata"] as? Map<*, *>)?.get("Resolve_OTIO") as? Map<*, *> ?: continue
+            if (r["Effect Name"] != "Fairlight Clip Volume and Fades" || r["Enabled"] == false) continue
+            val p = (r["Parameters"] as? List<*>).orEmpty().filterIsInstance<Map<*, *>>()
+                .firstOrNull { it["Parameter ID"] == "volume" } ?: continue
+            val db = (p["Parameter Value"] as? Number)?.toFloat() ?: continue
+            return if (db <= -100f) 0f else dbToVolume(db).coerceIn(0f, MAX_CLIP_VOLUME)
+        }
+        return 1f
     }
 
     private fun Map<*, *>.schema(): String = this["OTIO_SCHEMA"] as? String ?: ""
@@ -233,6 +250,7 @@ object OtioImport {
                 out += Clip(
                     newId(), m.sourceId, trackNo, start, sourceIn, length,
                     Fade(frames(c.fadeIn), curve), Fade(frames(c.fadeOut), curve), video = track.video,
+                    volume = c.volume,
                 ).withValidFades()
                 if (track.video) vUsed = maxOf(vUsed, index + 1) else aUsed = maxOf(aUsed, index + 1)
                 if (!track.video && !track.enabled) muted += trackNo

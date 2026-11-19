@@ -324,9 +324,17 @@ object Exporters {
             val markers = p.clip.markers.map { it to rate.toFrames(it.frame) }
                 .filter { (_, f) -> f >= p.inF && f < p.inF + p.len }
                 .joinToString(", ") { (m, f) -> marker(m, tc + f) }
+            // Clip volume, as Resolve writes it: a Fairlight clip volume effect with the level in dB.
+            val effects = if (p.clip.video || p.clip.volume == 1f) "" else {
+                val db = maxOf(volumeToDb(p.clip.volume), -100f)
+                """{"OTIO_SCHEMA": "Effect.1", "name": "", "effect_name": "Resolve Effect", "metadata": {"Resolve_OTIO": {""" +
+                    """"Effect Name": "Fairlight Clip Volume and Fades", "Enabled": true, "Name": "Volume", "Type": 62, """ +
+                    """"Parameters": [{"Parameter ID": "volume", "Parameter Value": ${"%.4f".format(java.util.Locale.US, db)}, """ +
+                    """"Variant Type": "Double", "Key Frames": {}}]}}}"""
+            }
             // Source times count from the file's own start timecode, as in Resolve's own OTIO files.
             return """{"OTIO_SCHEMA": "Clip.1", "name": ${js(p.src.name)}, "source_range": ${range(tc + p.inF, p.len)}, """ +
-                """"media_reference": $media, "effects": [], "markers": [$markers], "enabled": true, "metadata": {}}"""
+                """"media_reference": $media, "effects": [$effects], "markers": [$markers], "enabled": true, "metadata": {}}"""
         }
 
         fun track(name: String, kind: String, laneClips: List<Clip>, isVideo: Boolean, enabled: Boolean): String {

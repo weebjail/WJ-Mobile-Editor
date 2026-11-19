@@ -161,4 +161,19 @@ class OtioImportTest {
         assertEquals("Edit \"1\"\n", otio.name)
         assertEquals(0, otio.clipCount)
     }
+
+    @Test fun readsResolveClipVolume() {
+        // As Resolve writes it: a Fairlight clip volume effect with the level in dB.
+        val c = MiniJson.parse(
+            """{"effects": [{"OTIO_SCHEMA": "Effect.1", "effect_name": "Resolve Effect", "metadata": {"Resolve_OTIO": {""" +
+                """"Effect Name": "Fairlight Clip Volume and Fades", "Enabled": true, "Name": "Volume", "Type": 62, """ +
+                """"Parameters": [{"Parameter ID": "volume", "Parameter Value": -6.0206, "Variant Type": "Double"}]}}}]}"""
+        ) as Map<*, *>
+        assertEquals(0.5f, OtioImport.clipVolume(c), 1e-3f)
+        // Left at 0 dB, Resolve writes the effect with no parameters.
+        val plain = MiniJson.parse(
+            """{"effects": [{"metadata": {"Resolve_OTIO": {"Effect Name": "Fairlight Clip Volume and Fades", "Parameters": []}}}]}"""
+        ) as Map<*, *>
+        assertEquals(1f, OtioImport.clipVolume(plain), 0f)
+    }
 }
